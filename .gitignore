@@ -1,0 +1,15 @@
+# 运行时生成 / 机器相关，不入库
+config.ps1
+state.json
+export.log
+.export.lock
+
+# 日志与输出目录
+events/
+tamper/
+reports/
+assets/
+
+# 系统文件
+Thumbs.db
+Desktop.ini
