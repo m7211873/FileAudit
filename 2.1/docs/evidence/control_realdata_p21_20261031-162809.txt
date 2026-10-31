@@ -1,0 +1,11 @@
+﻿control-group: idle 45 s, NO tested process started
+realDataDir = C:\Users\m7211\AppData\Roaming\NetWatcher
+startedAt   = 2026-10-31 16:28:09.715 +08:00
+before done = 2026-10-31 16:28:09.848
+after  done = 2026-10-31 16:28:54.851
+user PID 10856 before: alive=True ; after: alive=True
+files before=6 after=6
+changed files = 1
+修改 C:\Users\m7211\AppData\Roaming\NetWatcher\data\2026-10-31.json
+  before=216443|639290320856827247|DBCC953A49F69D1AE8261414E571F4BCB1E7A5C949C27FFCD7A0E67117F73B2C
+  after =216451|639290321307857311|CA0748DD775FD5A7C47572E0DFC0064597967A2B665E930DC79BE36F1C5509E0
