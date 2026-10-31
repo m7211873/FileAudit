@@ -246,7 +246,20 @@ build.bat
 
 ---
 
-## 九、项目结构
+## 九、代码签名（可选，消除"未知发布者"提示）
+
+- **签名必须在编译之后做**：`build.bat` 会覆盖 `bin\NetWatcher.exe`，重编译后要重新签名。
+  一条命令完成两者：`build-and-sign.bat`（先编译再调用签名脚本）。
+- 签名脚本：`tools\sign\sign.ps1`（自签名，不需要 Windows SDK / signtool，不需要管理员），
+  `tools\sign\verify-sign.ps1` 验证，`tools\sign\README.md` 有完整说明与 2026 年商业证书调研结论。
+- **自签名的局限**：本机（及导入过证书的机器）可消除"未知发布者"；对 **SmartScreen 下载拦截无效**
+  （微软官方口径：自签名与未签名同等待遇）。要给别人用且不报警，需要**商业 OV 证书**
+  （个人最低成本约 600 元/年，如 Certum 个人版云签名）并持续签名积累信誉；开源项目可申请
+  SignPath Foundation（免费）或 Certum 开源名额。
+- **注意**：如果安全软件提示来自**火绒 / 360 等第三方 HIPS**（不是 Windows SmartScreen），
+  签名不一定会让它放行，需要在对应安全软件里把程序加入"信任区"。
+
+## 十、项目结构
 
 ```
 NetWatcher/
@@ -260,11 +273,15 @@ NetWatcher/
 │   ├── GeoIp.cs           # IP 归属地（后台解析 + 缓存）
 │   ├── Config.cs          # 配置
 │   └── Json.cs            # JSON 小工具
-├── bin\NetWatcher.exe     # 编译产物（主程序）
+├── bin\NetWatcher.exe     # 编译产物（主程序，可签名）
 ├── app.ico                # 图标
 ├── build.bat              # 编译脚本
+├── build-and-sign.bat     # 编译 + 自签名（一条命令）
 ├── install.ps1            # 安装（数据目录 / 开机自启 / 桌面快捷方式）
 ├── uninstall.ps1          # 卸载（-DeleteData 才删数据）
+├── tools\sign\            # 代码签名脚本与说明
+├── tools\qa\              # 自动化验收脚本
 ├── docs\design-2.0.md     # 2.0 设计契约（开发用）
 └── README.md              # 本文件
 ```
+
