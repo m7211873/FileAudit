@@ -117,7 +117,7 @@ P0 四项与 P1 八项修复全部落地并冻结，两轮独立回归验收通�
 
 1. **真机安装/卸载验证**（需用户先退出 2.0）：`install.ps1` → 启动 → 数据落盘 → `uninstall.ps1`（保留数据）→ 重装；
    并确认 2.0 的目录/自启/快捷方式/数据零变化（脚本目前仅静态审查 + PS 5.1 Parser 0 error）。
-2. **Gitee 提交/push**（Lead）：`git add 2.1 && git commit`，补提交号；GitHub 镜像已同步（main = `485f2b6`）。
+2. **Gitee 提交/push**（Lead）：`git add 2.1 && git commit`，补提交号；GitHub 镜像已同步（与 Gitee 同一 main 提交）。
 3. **P2 体验项**：列宽记忆、历史趋势图（`samples` 分钟桶已在 JSON 里）、CSV 导出范围选择。
 4. **长期**：ETW 逐 IP/逐进程统计（覆盖 UDP/QUIC）；对外分发签名（SignPath / Certum）。
 5. **可选**：重截 2.1 真机截图替换 `docs/screenshots/`（当前仍是 2.0 截图并已标注）。
