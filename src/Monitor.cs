@@ -146,18 +146,22 @@ namespace NetWatcher
             string date = now.ToString("yyyy-MM-dd");
             if (date != currentDate) RotateDay(date);
 
-            // 活动连接筛选
+            // 活动连接筛选：记录所有"有远端"的 TCP 连接状态（ESTABLISHED / SYN_SENT / FIN_WAIT /
+            // TIME_WAIT / CLOSE_WAIT 等），只排除 LISTEN。这样与资源监视器的口径更接近，
+            // 短命连接在采样瞬间也能被抓到；字节统计仍只对 ESTABLISHED 做差分。
             List<ConnEntry> active = new List<ConnEntry>();
+            List<ConnEntry> established = new List<ConnEntry>();
             for (int i = 0; i < conns.Count; i++)
             {
                 ConnEntry c = conns[i];
-                if (c.State != "ESTABLISHED") continue;
+                if (c.State == "LISTEN" || c.State == "CLOSED") continue;
                 string rip = GeoIp.NormalizeIp(c.RemoteIp);
                 if (string.IsNullOrEmpty(rip) || rip == "0.0.0.0" || rip == "::") continue;
                 if (rip == "127.0.0.1" || rip == "::1") continue;
                 if (!cfg.ShowLocalIp && GeoIp.IsLocalIp(rip)) continue;
                 c.RemoteIp = rip;
                 active.Add(c);
+                if (c.State == "ESTABLISHED") established.Add(c);
             }
 
             // 总流量与速率
@@ -201,9 +205,9 @@ namespace NetWatcher
 
             if (isAdmin)
             {
-                for (int i = 0; i < active.Count; i++)
+                for (int i = 0; i < established.Count; i++)
                 {
-                    ConnEntry c = active[i];
+                    ConnEntry c = established[i];
                     if (c.Proto != "TCP") continue;
                     string key = ConnKey(c);
                     ConnState st = connStates[key];
@@ -243,17 +247,17 @@ namespace NetWatcher
 
             bool precise = preciseCount > 0;
 
-            // 非精确时：按活动连接数均分总流量（明确标注"估算"；余数给最后一条，保证合计不丢字节）
-            if (!precise && active.Count > 0)
+            // 非精确时：按 ESTABLISHED 连接数均分总流量（明确标注"估算"；余数给最后一条，保证合计不丢字节）
+            if (!precise && established.Count > 0)
             {
-                long sIn = deltaIn / active.Count;
-                long sOut = deltaOut / active.Count;
+                long sIn = deltaIn / established.Count;
+                long sOut = deltaOut / established.Count;
                 long remIn = deltaIn, remOut = deltaOut;
-                for (int i = 0; i < active.Count; i++)
+                for (int i = 0; i < established.Count; i++)
                 {
-                    ConnEntry c = active[i];
+                    ConnEntry c = established[i];
                     long aIn = sIn, aOut = sOut;
-                    if (i == active.Count - 1) { aIn = remIn; aOut = remOut; }
+                    if (i == established.Count - 1) { aIn = remIn; aOut = remOut; }
                     remIn -= aIn; remOut -= aOut;
                     string key = ConnKey(c);
                     connDelta[key] = new long[] { aIn, aOut };
@@ -470,7 +474,7 @@ namespace NetWatcher
                 s.PeakInBps = current.peakInBps;
                 s.PeakOutBps = current.peakOutBps;
                 s.LastScan = now;
-                s.EstablishedCount = active.Count;
+                s.EstablishedCount = established.Count;
                 s.PreciseConnCount = preciseCount;
                 s.LastError = lastEStatsError;
 

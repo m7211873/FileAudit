@@ -66,6 +66,14 @@ namespace NetWatcher
     {
         static Mutex mutex;
 
+        const string MainWindowTitle = "IP监控2.0 · 网络连接监控 (NetWatcher)";
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        static extern IntPtr FindWindow(string className, string windowTitle);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool IsWindowVisible(IntPtr hWnd);
+
         [STAThread]
         static void Main(string[] args)
         {
@@ -90,6 +98,7 @@ namespace NetWatcher
                 {
                     string a = args[i];
                     if (a == "--background" || a == "-b" || a == "--minimized") background = true;
+                    else if (a == "--show") { /* 与普通启动等价：已有实例则唤出窗口 */ }
                     else if (a == "--selftest" || a == "--test") selfTest = true;
                     else if (a == "--autostart-on") autostartOn = true;
                     else if (a == "--autostart-off") autostartOff = true;
@@ -105,6 +114,8 @@ namespace NetWatcher
                 string effectiveDir = cfg.EffectiveDataDir();
                 Store.Init(effectiveDir);
                 GeoIp.Init(effectiveDir, cfg.GeoApi, cfg.GeoEnabled);
+                AppendStartup(effectiveDir, "Program: 启动 exe=" + Startup.ExePath() + " 数据目录=" + effectiveDir
+                    + " 管理员=" + NativeMethods.IsAdministrator() + " 间隔=" + cfg.ScanIntervalSeconds + "s");
 
                 if (selfTest)
                 {
@@ -131,15 +142,57 @@ namespace NetWatcher
                 }
 
                 // 单实例（--mutex-tag 可让测试实例互不干扰）
+                // 第二次启动不再弹「已经在运行」，而是通知第一个实例把窗口显示出来，然后自己退出。
                 string mutexName = "NetWatcher_SingleInstance_Mutex";
                 if (!string.IsNullOrEmpty(mutexTag)) mutexName += "_" + mutexTag;
+                string activateName = mutexName + "_Activate";
                 bool createdNew;
                 mutex = new Mutex(true, mutexName, out createdNew);
                 if (!createdNew)
                 {
-                    MessageBox.Show("IP监控 已经在运行中（请查看系统托盘图标）。", "IP监控", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    // 已有实例：先通知它显示窗口
+                    bool signaled = false;
+                    try
+                    {
+                        using (EventWaitHandle ev = EventWaitHandle.OpenExisting(activateName))
+                        {
+                            ev.Set();
+                            signaled = true;
+                        }
+                    }
+                    catch { }
+                    // 等 1.5 秒确认窗口真的出来了；若第一个实例卡死（历史 bug），给出可操作的提示
+                    Thread.Sleep(1500);
+                    IntPtr h = FindWindow(null, MainWindowTitle);
+                    if (signaled && h != IntPtr.Zero && IsWindowVisible(h)) return;
+                    try
+                    {
+                        MessageBox.Show(
+                            "检测到 IP监控 已在后台运行，但窗口没有响应。\n\n" +
+                            "处理办法：\n" +
+                            "1) 打开任务管理器 → 详细信息 → 结束 NetWatcher.exe\n" +
+                            "2) 重新双击程序启动\n\n" +
+                            "排查日志：数据目录下的 startup.log / crash.log",
+                            "IP监控", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                    catch { }
                     return;
                 }
+
+                EventWaitHandle activateEvent = null;
+                try { activateEvent = new EventWaitHandle(false, EventResetMode.AutoReset, activateName); }
+                catch { }
+
+                AppendStartup(effectiveDir, "Program: 单实例就绪 args=" + string.Join(" ", args));
+
+                // 监控引擎与界面解耦：引擎在界面创建之前启动，界面/托盘异常也不会导致"进程活着但不采集"
+                Monitor monitor = new Monitor(cfg);
+                try
+                {
+                    monitor.Start();
+                    AppendStartup(effectiveDir, "Program: 监控引擎已启动");
+                }
+                catch (Exception mex) { LogFatal(effectiveDir, "Monitor.Start", mex); }
 
                 // UI 线程异常也写日志，避免"静默退出"
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -159,8 +212,10 @@ namespace NetWatcher
                 Application.SetCompatibleTextRenderingDefault(false);
                 try
                 {
-                    MainForm form = new MainForm(cfg, background);
+                    MainForm form = new MainForm(cfg, background, monitor, activateEvent, effectiveDir);
+                    AppendStartup(effectiveDir, "Program: MainForm 已创建");
                     Application.Run(form);
+                    AppendStartup(effectiveDir, "Program: Application.Run 退出");
                 }
                 catch (Exception uiEx)
                 {
@@ -172,11 +227,34 @@ namespace NetWatcher
                     }
                     catch { }
                 }
+                finally
+                {
+                    try { monitor.Stop(); } catch { }
+                }
             }
             catch (Exception ex)
             {
                 LogFatal("", "Main", ex);
             }
+        }
+
+        // 启动过程日志：用于诊断"进程活着但没界面 / 不采集"这类问题
+        internal static void AppendStartup(string dir, string message)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(dir)) return;
+                Directory.CreateDirectory(dir);
+                string p = Path.Combine(dir, "startup.log");
+                try
+                {
+                    FileInfo fi = new FileInfo(p);
+                    if (fi.Exists && fi.Length > 256 * 1024) File.Delete(p);
+                }
+                catch { }
+                File.AppendAllText(p, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "  " + message + "\r\n");
+            }
+            catch { }
         }
 
         // 致命异常统一落盘：优先数据目录（WMI 启动时 %TEMP% 可能为空且不可写）

@@ -18,13 +18,22 @@ namespace NetWatcher
     {
         const string DateFmt = "yyyy-MM-dd";
 
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+        static extern int RegisterWindowMessage(string message);
+
+        static readonly int WM_TASKBARCREATED = RegisterWindowMessage("TaskbarCreated");
+
         // ---------------- 基础 ----------------
         readonly AppConfig cfg;
         readonly bool background;
+        readonly string dataDir;
+        readonly System.Threading.EventWaitHandle activateEvent;
         Monitor monitor;
         NotifyIcon tray;
         ToolTip toolTip;
         System.Windows.Forms.Timer timer;
+        System.Windows.Forms.Timer trayRetryTimer;
+        int trayRetryCount = 0;
         bool reallyExiting = false;
         bool adminMode = false;
         bool trayHintShown = false;
@@ -93,20 +102,84 @@ namespace NetWatcher
         // =============================================================
         // 构造 / 生命周期
         // =============================================================
-        public MainForm(AppConfig cfg, bool background)
+        public MainForm(AppConfig cfg, bool background, Monitor monitor, System.Threading.EventWaitHandle activateEvent, string dataDir)
         {
             this.cfg = cfg;
             this.background = background;
+            this.monitor = monitor;
+            this.activateEvent = activateEvent;
+            this.dataDir = dataDir;
             selectedDate = DateTime.Now.ToString(DateFmt);
             adminMode = SafeIsAdmin();
 
             BuildUi();
             BuildTray();
 
-            monitor = new Monitor(cfg);
             timer = new System.Windows.Forms.Timer();
             timer.Interval = 1000;
             timer.Tick += OnTimerTick;
+        }
+
+        void Trace(string msg)
+        {
+            Program.AppendStartup(dataDir, "MainForm: " + msg);
+        }
+
+        // 第二个实例启动时通知本实例：把窗口显示出来（修复"提示已在运行但托盘找不到"）
+        void StartActivationListener()
+        {
+            if (activateEvent == null) return;
+            System.Threading.Thread th = new System.Threading.Thread(delegate()
+            {
+                while (!reallyExiting)
+                {
+                    try
+                    {
+                        if (!activateEvent.WaitOne(2000)) continue;
+                        if (reallyExiting) return;
+                        try
+                        {
+                            BeginInvoke((MethodInvoker)delegate
+                            {
+                                EnsureTray();
+                                ShowMain();
+                            });
+                        }
+                        catch { }
+                    }
+                    catch { return; }
+                }
+            });
+            th.IsBackground = true;
+            th.Name = "NetWatcherActivate";
+            th.Start();
+        }
+
+        // 托盘图标兜底：开机自启时资源管理器可能还没准备好通知区域，重试可避免"进程在、托盘没有"
+        void EnsureTray()
+        {
+            try
+            {
+                if (tray == null)
+                {
+                    BuildTray();
+                    Trace("托盘图标已重建");
+                    return;
+                }
+                tray.Visible = false;
+                tray.Visible = true;
+            }
+            catch { }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            // 资源管理器重启后（TaskbarCreated 广播）重新添加托盘图标
+            if (m.Msg == WM_TASKBARCREATED)
+            {
+                EnsureTray();
+            }
+            base.WndProc(ref m);
         }
 
         protected override void OnLoad(EventArgs e)
@@ -117,16 +190,30 @@ namespace NetWatcher
             UpdateAdminButton();
             UpdateHeader(curSnap);
             ForceRefresh();
-            try { monitor.Start(); }
-            catch { }
             timer.Start();
+
+            StartActivationListener();
 
             if (background)
             {
                 ShowInTaskbar = false;
                 WindowState = FormWindowState.Minimized;
                 Hide();
+                // 前 30 秒每 3 秒补一次托盘图标（开机自启场景下通知区域可能尚未就绪）
+                trayRetryTimer = new System.Windows.Forms.Timer();
+                trayRetryTimer.Interval = 3000;
+                trayRetryTimer.Tick += delegate
+                {
+                    trayRetryCount++;
+                    EnsureTray();
+                    if (trayRetryCount >= 10)
+                    {
+                        try { trayRetryTimer.Stop(); trayRetryTimer.Dispose(); } catch { }
+                    }
+                };
+                trayRetryTimer.Start();
             }
+            Trace("OnLoad 完成 (background=" + background + ")");
         }
 
         void SetupSplitter()

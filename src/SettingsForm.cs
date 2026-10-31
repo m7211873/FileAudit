@@ -5,12 +5,12 @@ using System.Windows.Forms;
 namespace NetWatcher
 {
     /// <summary>
-    /// IP监控2.0 设置窗口：扫描间隔（2/5/10/30/60 秒）、保留天数、开机自启、
+    /// IP监控2.0 设置窗口：扫描间隔（1/2/5/10/30/60 秒）、保留天数、开机自启、
     /// 启动最小化、归属地识别、新公网 IP 提醒、是否显示内网/本机地址。
     /// </summary>
     public class SettingsForm : Form
     {
-        static readonly int[] Intervals = new int[] { 2, 5, 10, 30, 60 };
+        static readonly int[] Intervals = AppConfig.AllowedIntervals;
 
         readonly AppConfig cfg;
         ComboBox cboInterval;
@@ -63,7 +63,7 @@ namespace NetWatcher
 
             // 扫描间隔
             AddRow(root, 1, MakeLabel("扫描间隔:"), MakeIntervalCombo(),
-                "值越小越精确，但 CPU 占用更高（默认 5 秒）");
+                "值越小越不容易漏掉短连接，但 CPU 占用更高（默认 2 秒）");
 
             // 数据保留
             numRetention = new NumericUpDown();
@@ -144,8 +144,9 @@ namespace NetWatcher
             cboInterval.DropDownStyle = ComboBoxStyle.DropDownList;
             cboInterval.Width = 150;
             cboInterval.Margin = new Padding(0, 3, 0, 0);
-            cboInterval.Items.Add("2 秒（最精细）");
-            cboInterval.Items.Add("5 秒（推荐）");
+            cboInterval.Items.Add("1 秒（最精细）");
+            cboInterval.Items.Add("2 秒（推荐）");
+            cboInterval.Items.Add("5 秒");
             cboInterval.Items.Add("10 秒");
             cboInterval.Items.Add("30 秒");
             cboInterval.Items.Add("60 秒（最省资源）");

@@ -6,8 +6,8 @@ namespace NetWatcher
 {
     public class AppConfig
     {
-        // 采样间隔：2 / 5 / 10 / 30 / 60 秒（默认 5 秒）
-        public int ScanIntervalSeconds = 5;
+        // 采样间隔：1 / 2 / 5 / 10 / 30 / 60 秒（默认 2 秒；越短越不容易漏掉短命连接）
+        public int ScanIntervalSeconds = 2;
         public bool AutoStart = false;
         public int RetentionDays = 0;            // 0 = 永久保留
         public bool StartMinimized = false;
@@ -17,7 +17,7 @@ namespace NetWatcher
         public string GeoApi = "http://ip-api.com/json/{0}?fields=status,message,country,regionName,city,isp,lat,lon&lang=zh-CN";
         public string DataDir = "";              // 空 = 默认 %APPDATA%\NetWatcher（仅内存，不落盘）
 
-        public static readonly int[] AllowedIntervals = new int[] { 2, 5, 10, 30, 60 };
+        public static readonly int[] AllowedIntervals = new int[] { 1, 2, 5, 10, 30, 60 };
 
         public static string DefaultDataDir()
         {
@@ -42,7 +42,8 @@ namespace NetWatcher
                 if (AllowedIntervals[i] == v) return v;
             }
             // 兼容 1.0 的 60/300 等旧值：落到最近的合法值
-            if (v < 3) return 2;
+            if (v <= 1) return 1;
+            if (v < 4) return 2;
             if (v < 8) return 5;
             if (v < 20) return 10;
             if (v < 45) return 30;
