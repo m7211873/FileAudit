@@ -6,5 +6,5 @@ using System.Reflection;
 [assembly: AssemblyProduct("IP监控2.1 (NetWatcher)")]
 [assembly: AssemblyCompany("NSYBdeDFY")]
 [assembly: AssemblyCopyright("Copyright (C) 2026 NSYBdeDFY")]
-[assembly: AssemblyVersion("2.1.1.0")]
-[assembly: AssemblyFileVersion("2.1.1.0")]
+[assembly: AssemblyVersion("2.2.0.0")]
+[assembly: AssemblyFileVersion("2.2.0.0")]

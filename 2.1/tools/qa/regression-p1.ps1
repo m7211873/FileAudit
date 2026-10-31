@@ -13,7 +13,7 @@
     R8 自启往返：备份 Run\NetWatcher2.1 与 Run\NetWatcher(2.0) → 清 2.1 值 →
        --autostart-on --datadir <temp> 写入（含 --background/--datadir/指向被测 exe）→
        --autostart-off 删除 → 断言 2.0 的 Run\NetWatcher 全程未变。
-    R9 版本资源：被测 exe FileVersion/ProductVersion = 2.1.x.0（2.1.0 / 2.1.1 …）。
+    R9 版本资源：被测 exe FileVersion/ProductVersion = 2.x.y.0（2.1.0 / 2.1.1 / 2.2.0 …）。
     R10 GUI-GUI 数据目录冲突：GUI A 占 datadir（tag a）→ GUI B 同 datadir 不同 tag →
        5 秒重试后弹出标题恰为「IP监控2.1」的提示框，且 A 仍存活；按记录 PID 结束 B、A。
     R11 自启状态对账：sentinel 写入 Run\NetWatcher2.1 + config.AutoStart=false → 启动 GUI 8s
@@ -589,11 +589,11 @@ try {
             $viRun = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($RunExe)
             $viSrc = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Exe)
             Add-Info 'R9_VERSION_INFO' ("FileVersion={0} ProductVersion={1} FileDescription={2} ProductName={3}" -f $viRun.FileVersion, $viRun.ProductVersion, $viRun.FileDescription, $viRun.ProductName)
-            if ($viRun.FileVersion -match '^2\.1\.\d+\.0$') { Pass 'R9_FILE_VERSION' ("FileVersion={0}" -f $viRun.FileVersion) }
+            if ($viRun.FileVersion -match '^2\.\d+\.\d+\.0$') { Pass 'R9_FILE_VERSION' ("FileVersion={0}" -f $viRun.FileVersion) }
             else { Fail 'R9_FILE_VERSION' ("FileVersion={0}（期望 2.1.x.0）" -f $viRun.FileVersion) }
-            if ($viRun.ProductVersion -match '^2\.1\.\d+\.0$') { Pass 'R9_PRODUCT_VERSION' ("ProductVersion={0}" -f $viRun.ProductVersion) }
+            if ($viRun.ProductVersion -match '^2\.\d+\.\d+\.0$') { Pass 'R9_PRODUCT_VERSION' ("ProductVersion={0}" -f $viRun.ProductVersion) }
             else { Fail 'R9_PRODUCT_VERSION' ("ProductVersion={0}（期望 2.1.x.0）" -f $viRun.ProductVersion) }
-            if ($viSrc.FileVersion -match '^2\.1\.\d+\.0$') { Add-Info 'R9_SRC_EXE_VERSION' ("源 exe FileVersion={0}" -f $viSrc.FileVersion) }
+            if ($viSrc.FileVersion -match '^2\.\d+\.\d+\.0$') { Add-Info 'R9_SRC_EXE_VERSION' ("源 exe FileVersion={0}" -f $viSrc.FileVersion) }
             else { Warn 'R9_SRC_EXE_VERSION' ("源 exe FileVersion={0}（期望 2.1.x.0）" -f $viSrc.FileVersion) }
         } catch {
             Fail 'R9_UNEXPECTED' ("异常: " + $_.Exception.Message)

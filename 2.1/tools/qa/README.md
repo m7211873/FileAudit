@@ -26,6 +26,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\verify.ps1 -Screens
 | 无界面验收 `verify.ps1 -SkipGui -Seconds 30` | PASS=24 FAIL=2 WARN=2（tag `20261031-163622`） | `out/report_20261031-163622.txt` |
 | GUI 冒烟 `verify.ps1 -Seconds 20 -MutexTag p1qa` | **PASS=39** FAIL=2 WARN=2（tag `20261031-163730`） | `out/report_20261031-163730.txt`、`out/gui_*_20261031-163730.png` |
 | 启动顺序回归 `regression-activation.ps1` | **PASS=9 FAIL=0 WARN=0**（2026-10-31，二次启动唤出 / 不同 tag 冲突 / daemon exit=2） | 同目录脚本输出 |
+| 2.2.0 冒烟（手工） | 5 标签页可见、趋势曲线渲染、活动筛选、日期高亮/置灰、`--quit` 退出；完整回归未跑（用户要求先出功能） | 见 `_analysis/screenshots/v220-*.png`（本地） |
 
 - 两轮共 4 个 FAIL **全部为环境归因，不是产品缺陷**（判据未削弱、未改判）：
   1. `SELFTEST_GEOIP`：本机到 `ip-api.com` 间歇不可达（脚本已自动重试一次；同批 GUI run 该检查曾 PASS）；

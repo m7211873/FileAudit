@@ -505,7 +505,7 @@ if ($existing.Count -gt 0) {
 }
 
 $script:Screenshots = New-Object System.Collections.ArrayList
-$tabExpected = @('实时连接', '进程视图', '按日统计', '历史概览')
+$tabExpected = @('实时连接', '进程视图', '按日统计', '趋势', '历史概览')
 
 try {
     # -------------------------------------------------------------- 1. 编译
@@ -904,7 +904,7 @@ try {
             $tabW = $tr.Right - $tr.Left
             $tabH = $tr.Bottom - $tr.Top
             if ($tabCount -eq $tabExpected.Count) { Pass 'GUI_TABS_FOUND' ("TabControl 有 {0} 个标签页" -f $tabCount) }
-            else { Fail 'GUI_TABS_FOUND' ("TabControl 标签页数量={0}，期望 4" -f $tabCount) }
+            else { Fail 'GUI_TABS_FOUND' ("TabControl 标签页数量={0}，期望 {1}" -f $tabCount, $tabExpected.Count) }
 
             $headerFrac = [QaWin]::VisibleBand($tabHwnd, 26)
             if ($headerFrac -ge 0.95) { Pass 'GUI_TABHEADER_VISIBLE' ("标签栏可见比例 {0:P0}（TabControl {1}x{2}）" -f $headerFrac, $tabW, $tabH) }
@@ -940,9 +940,9 @@ try {
             $realOk = $true
             $tabProblems = New-Object System.Collections.ArrayList
             $gridFoundPerTab = New-Object System.Collections.ArrayList
-            $gridExpected = @(2, 0, 1, 1)
+            $gridExpected = @(2, 0, 1, 0, 1)
             $realNotes = New-Object System.Collections.ArrayList
-            for ($i = 0; $i -lt [Math]::Min(4, $tabCount); $i++) {
+            for ($i = 0; $i -lt [Math]::Min($tabExpected.Count, $tabCount); $i++) {
                 if (-not $tabRanges.ContainsKey($i)) {
                     $labels += ''
                     $mechOk = $false
@@ -1005,12 +1005,12 @@ try {
             }
             $labelsJoined = ($labels -join ' / ')
             if (($labels -join '|') -eq ($tabExpected -join '|')) { Pass 'GUI_TABS_TEXT' ("标签页文本(页面窗口标题): " + $labelsJoined) }
-            elseif ((@($labels | Sort-Object) -join '|') -eq (@($tabExpected | Sort-Object) -join '|')) { Warn 'GUI_TABS_TEXT' ("四个标签页文本存在但顺序不同: " + $labelsJoined) }
-            else { Fail 'GUI_TABS_TEXT' ("期望 4 个标签页 '{0}'，实际: {1}" -f ($tabExpected -join ' / '), $labelsJoined) }
+            elseif ((@($labels | Sort-Object) -join '|') -eq (@($tabExpected | Sort-Object) -join '|')) { Warn 'GUI_TABS_TEXT' ("标签页文本存在但顺序不同: " + $labelsJoined) }
+            else { Fail 'GUI_TABS_TEXT' ("期望 {0} 个标签页 '{1}'，实际: {2}" -f $tabExpected.Count, ($tabExpected -join ' / '), $labelsJoined) }
 
-            if ($mechOk) { Pass 'GUI_TAB_SWITCH_LOGIC' '四个标签页均可切换（TCM_GETCURSEL 与页面窗口一致）' }
+            if ($mechOk) { Pass 'GUI_TAB_SWITCH_LOGIC' '所有标签页均可切换（TCM_GETCURSEL 与页面窗口一致）' }
             else { Fail 'GUI_TAB_SWITCH_LOGIC' (($tabProblems | Where-Object { $_ -match '机械切换失败' }) -join '; ') }
-            if ($realOk) { Pass 'GUI_TAB_CLICK_REAL' '四个标签页均可被真实鼠标点击切换（用户可点）' }
+            if ($realOk) { Pass 'GUI_TAB_CLICK_REAL' '所有标签页均可被真实鼠标点击切换（用户可点）' }
             else { Fail 'GUI_TAB_CLICK_REAL' ('真实鼠标点击无法切换：' + (($realNotes | Select-Object -First 4) -join '; ')) }
 
             if ($tabProblems.Count -eq 0) { Pass 'GUI_GRID_HEADERS' ("各页 DataGridView 列头均可见（每页网格数: {0}）" -f ($gridFoundPerTab -join ',')) }

@@ -87,6 +87,22 @@ namespace NetWatcher
         Label lblHistSummary;
         DataGridView dgvHist;
 
+        // ---------------- 趋势（2.2.0 新增） ----------------
+        TabPage tpTrend;
+        Label lblTrendSummary;
+        Panel trendPanel;
+        DayData trendDay;
+        string trendDayDate = "";
+        DateTime lastTrendRebind = DateTime.MinValue;
+
+        // ---------------- 日期行 / 活动筛选（2.2.0） ----------------
+        Control dateRow;
+        Label lblDateLabel;
+        Label sepDate;
+        ComboBox cboActivity;
+        int filtMode;
+        HashSet<string> filtEst, filtLong, filtTop;
+
         // ---------------- 排序状态 ----------------
         sealed class SortSpec
         {
@@ -300,6 +316,7 @@ namespace NetWatcher
             InitGridColumns();
             ResumeLayout(true);
             UpdateAdminButton();
+            UpdateDateBar();
         }
 
         Control BuildHeader()
@@ -369,6 +386,7 @@ namespace NetWatcher
         Control BuildDateRow()
         {
             FlowLayoutPanel row = new FlowLayoutPanel();
+            dateRow = row;
             row.Dock = DockStyle.Fill;
             row.AutoSize = true;
             row.AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -376,7 +394,21 @@ namespace NetWatcher
             row.FlowDirection = FlowDirection.LeftToRight;
             row.Padding = new Padding(0, 2, 0, 0);
 
+            // 2.2.0：实时连接页用「活动筛选」替代日期行（日期在实时页本来就没有意义）
+            cboActivity = new ComboBox();
+            cboActivity.DropDownStyle = ComboBoxStyle.DropDownList;
+            cboActivity.Width = 180;
+            cboActivity.Margin = new Padding(0, 4, 8, 0);
+            cboActivity.Items.AddRange(new object[] {
+                "活动筛选：全部", "活动筛选：今天新出现（NEW）", "活动筛选：仅活跃（ESTABLISHED）",
+                "活动筛选：大流量 Top20", "活动筛选：仅公网 IP", "活动筛选：长连接（>60 秒）" });
+            cboActivity.SelectedIndex = 0;
+            cboActivity.Visible = false;
+            cboActivity.SelectedIndexChanged += delegate { RebindActiveTab(true); };
+            row.Controls.Add(cboActivity);
+
             Label l = new Label();
+            lblDateLabel = l;
             l.Text = "查看日期:";
             l.AutoSize = true;
             l.Margin = new Padding(0, 8, 4, 0);
@@ -407,6 +439,7 @@ namespace NetWatcher
             row.Controls.Add(datePicker);
 
             Label sep = new Label();
+            sepDate = sep;
             sep.Text = "|";
             sep.AutoSize = true;
             sep.ForeColor = Color.Silver;
@@ -513,21 +546,24 @@ namespace NetWatcher
             tpLive = MakeTabPage("实时连接");
             tpProc = MakeTabPage("进程视图");
             tpDate = MakeTabPage("按日统计");
+            tpTrend = MakeTabPage("趋势");
             tpHist = MakeTabPage("历史概览");
 
             t.TabPages.Add(tpLive);
             t.TabPages.Add(tpProc);
             t.TabPages.Add(tpDate);
+            t.TabPages.Add(tpTrend);
             t.TabPages.Add(tpHist);
 
             BuildLivePage();
             BuildProcPage();
             BuildDatePage();
+            BuildTrendPage();
             BuildHistPage();
 
             t.SelectedIndexChanged += delegate
             {
-                if (!inSetDate) RebindActiveTab(true);
+                if (!inSetDate) { UpdateDateBar(); RebindActiveTab(true); }
             };
             return t;
         }
@@ -751,6 +787,267 @@ namespace NetWatcher
             tl.Controls.Add(dgvHist, 0, 1);
 
             tpHist.Controls.Add(tl);
+        }
+
+        // =============================================================
+        // 日期行 / 活动筛选（2.2.0）
+        // =============================================================
+        void UpdateDateBar()
+        {
+            try
+            {
+                if (dateRow == null) return;
+                bool live = (tabs != null && tabs.SelectedTab == tpLive);
+                bool showDate = !live;
+                Control[] dateCtrls = new Control[] { lblDateLabel, btnToday, btnYesterday, btnDayBefore, datePicker, sepDate };
+                for (int i = 0; i < dateCtrls.Length; i++) if (dateCtrls[i] != null) dateCtrls[i].Visible = showDate;
+                if (cboActivity != null) cboActivity.Visible = live;
+                if (!showDate) { dateRow.PerformLayout(); return; }
+
+                DateTime today = DateTime.Now.Date;
+                List<string> dates = new List<string>();
+                try { dates = Store.ListDates(); } catch { }
+                Button[] bs = new Button[] { btnToday, btnYesterday, btnDayBefore };
+                DateTime[] ds = new DateTime[] { today, today.AddDays(-1), today.AddDays(-2) };
+                string sel = selectedDate;
+                for (int i = 0; i < bs.Length; i++)
+                {
+                    if (bs[i] == null) continue;
+                    string dsStr = ds[i].ToString(DateFmt);
+                    bool has = dates.Contains(dsStr);
+                    bs[i].Enabled = has || sel == dsStr;
+                    bs[i].BackColor = (sel == dsStr) ? Color.FromArgb(208, 226, 248) : SystemColors.Control;
+                }
+                if (datePicker != null) datePicker.MaxDate = DateTime.Now.Date;
+                dateRow.PerformLayout();
+            }
+            catch { }
+        }
+
+        string DateLabel(string date)
+        {
+            if (string.IsNullOrEmpty(date)) return date == null ? "" : date;
+            DateTime dt;
+            if (!DateTime.TryParse(date, out dt)) return date;
+            DateTime today = DateTime.Now.Date;
+            string tag = "";
+            if (dt.Date == today) tag = "今天";
+            else if (dt.Date == today.AddDays(-1)) tag = "昨天";
+            else if (dt.Date == today.AddDays(-2)) tag = "前天";
+            return date + (tag.Length > 0 ? "（" + tag + "）" : "");
+        }
+
+        int ActivityFilter
+        {
+            get
+            {
+                try { return cboActivity == null ? 0 : (cboActivity.SelectedIndex < 0 ? 0 : cboActivity.SelectedIndex); }
+                catch { return 0; }
+            }
+        }
+
+        string ActivityFilterName()
+        {
+            int i = ActivityFilter;
+            if (i == 1) return "今天新出现";
+            if (i == 2) return "仅活跃连接";
+            if (i == 3) return "大流量 Top20";
+            if (i == 4) return "仅公网 IP";
+            if (i == 5) return "长连接 >60s";
+            return "";
+        }
+
+        bool ActivityMatchIp(LiveIp li)
+        {
+            if (filtMode == 0) return true;
+            if (li == null) return false;
+            if (filtMode == 1) return li.IsNew;
+            if (filtMode == 2) return filtEst != null && filtEst.Contains(li.Ip);
+            if (filtMode == 3) return filtTop != null && filtTop.Contains(li.Ip);
+            if (filtMode == 4) return !li.IsLocal;
+            if (filtMode == 5) return filtLong != null && filtLong.Contains(li.Ip);
+            return true;
+        }
+
+        bool ActivityMatchConn(LiveConn c)
+        {
+            if (filtMode == 0) return true;
+            if (c == null) return false;
+            if (filtMode == 1) return c.IsNew;
+            if (filtMode == 2) return c.State == "ESTABLISHED";
+            if (filtMode == 3) return filtTop != null && filtTop.Contains(c.Ip);
+            if (filtMode == 4) return !c.IsLocal;
+            if (filtMode == 5) return c.DurationSeconds >= 60;
+            return true;
+        }
+
+        // =============================================================
+        // 趋势页（2.2.0）：用 samples 分钟桶画 24 小时上下行曲线
+        // =============================================================
+        void BuildTrendPage()
+        {
+            TableLayoutPanel tl = NewFillTable(1, 2);
+            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 30F));
+            tl.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+            lblTrendSummary = new Label();
+            lblTrendSummary.Text = "趋势（加载中…）";
+            lblTrendSummary.Dock = DockStyle.Fill;
+            lblTrendSummary.TextAlign = ContentAlignment.MiddleLeft;
+            lblTrendSummary.Padding = new Padding(8, 0, 8, 0);
+            lblTrendSummary.ForeColor = Color.FromArgb(50, 60, 80);
+            lblTrendSummary.AutoEllipsis = true;
+            tl.Controls.Add(lblTrendSummary, 0, 0);
+
+            trendPanel = new Panel();
+            trendPanel.Dock = DockStyle.Fill;
+            trendPanel.BackColor = Color.White;
+            trendPanel.BorderStyle = BorderStyle.FixedSingle;
+            EnableDoubleBuffer(trendPanel);
+            trendPanel.Paint += delegate(object s, PaintEventArgs e) { DrawTrend(e.Graphics, trendPanel.ClientSize); };
+            trendPanel.Resize += delegate { try { trendPanel.Invalidate(); } catch { } };
+            tl.Controls.Add(trendPanel, 0, 1);
+
+            tpTrend.Controls.Add(tl);
+        }
+
+        void RebindTrend()
+        {
+            if (lblTrendSummary == null || trendPanel == null) return;
+            string date = selectedDate;
+            DayData d = SafeGetDay(date);
+            trendDay = d;
+            trendDayDate = date;
+            if (d == null)
+            {
+                lblTrendSummary.Text = "趋势 · " + date + "（无数据）";
+                trendPanel.Invalidate();
+                return;
+            }
+            long sumIn = 0, sumOut = 0, peakIn = 0, peakOut = 0;
+            int n = 0;
+            if (d.samples != null)
+            {
+                foreach (long[] s in d.samples)
+                {
+                    if (s == null || s.Length < 3) continue;
+                    n++;
+                    sumIn += s[1]; sumOut += s[2];
+                    if (s[1] > peakIn) peakIn = s[1];
+                    if (s[2] > peakOut) peakOut = s[2];
+                }
+            }
+            lblTrendSummary.Text = "趋势 · " + DateLabel(date)
+                + "    ·    当日总量 ↓" + FmtBytes(d.bytesIn) + " ↑" + FmtBytes(d.bytesOut)
+                + "    ·    分钟桶 " + n + " 条（每分钟一根）"
+                + "    ·    峰值/分钟 ↓" + FmtBytes(peakIn) + " ↑" + FmtBytes(peakOut)
+                + "    ·    平均/分钟 ↓" + FmtBytes(n > 0 ? sumIn / n : 0) + " ↑" + FmtBytes(n > 0 ? sumOut / n : 0);
+            trendPanel.Invalidate();
+        }
+
+        static long DayStartUnix(string date)
+        {
+            DateTime dt;
+            if (!DateTime.TryParse(date, out dt)) dt = DateTime.Today;
+            DateTime local = dt.Date;
+            DateTime utc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(local, DateTimeKind.Unspecified));
+            return (long)(utc - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+        }
+
+        void DrawTrend(Graphics g, Size size)
+        {
+            try
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.White);
+                int left = 64, right = 16, top = 18, bottom = 34;
+                int w = size.Width - left - right;
+                int h = size.Height - top - bottom;
+                if (w < 60 || h < 40) return;
+
+                DayData d = trendDay;
+                long maxVal = 1;
+                int count = 0;
+                if (d != null && d.samples != null)
+                {
+                    foreach (long[] s in d.samples)
+                    {
+                        if (s == null || s.Length < 3) continue;
+                        count++;
+                        if (s[1] > maxVal) maxVal = s[1];
+                        if (s[2] > maxVal) maxVal = s[2];
+                    }
+                }
+
+                using (Pen grid = new Pen(Color.FromArgb(226, 232, 240), 1))
+                using (Font f8 = new Font("Microsoft YaHei", 8F))
+                using (SolidBrush bgray = new SolidBrush(Color.Gray))
+                {
+                    for (int i = 0; i <= 4; i++)
+                    {
+                        int y = top + h - (int)(h * i / 4.0);
+                        g.DrawLine(grid, left, y, left + w, y);
+                        long v = (long)(maxVal * (i / 4.0));
+                        g.DrawString(FmtBytes(v) + "/分", f8, bgray, new PointF(4, y - 8));
+                    }
+                    for (int hour = 0; hour <= 24; hour += 3)
+                    {
+                        int x = left + (int)(w * hour / 24.0);
+                        g.DrawLine(grid, x, top, x, top + h);
+                        g.DrawString(hour + ":00", f8, bgray, new PointF(x - 12, top + h + 8));
+                    }
+                }
+
+                if (d == null || count == 0)
+                {
+                    using (Font f10 = new Font("Microsoft YaHei", 10F))
+                    using (SolidBrush bdg = new SolidBrush(Color.DimGray))
+                    {
+                        string msg = "该日期暂无可绘制的分钟采样数据（程序需运行满 1 分钟并已落盘）";
+                        SizeF m = g.MeasureString(msg, f10);
+                        g.DrawString(msg, f10, bdg, new PointF(left + (w - m.Width) / 2, top + (h - m.Height) / 2));
+                    }
+                    return;
+                }
+
+                long startUnix = DayStartUnix(trendDayDate);
+                PointF[] ptsIn = new PointF[count];
+                PointF[] ptsOut = new PointF[count];
+                int n = 0;
+                foreach (long[] s in d.samples)
+                {
+                    if (s == null || s.Length < 3) continue;
+                    int minute = (int)((s[0] - startUnix) / 60);
+                    if (minute < 0) minute = 0;
+                    if (minute > 1439) minute = 1439;
+                    float x = left + (float)w * minute / 1439f;
+                    float yIn = top + h - (float)h * (s[1] > maxVal ? maxVal : s[1]) / (float)maxVal;
+                    float yOut = top + h - (float)h * (s[2] > maxVal ? maxVal : s[2]) / (float)maxVal;
+                    ptsIn[n] = new PointF(x, yIn);
+                    ptsOut[n] = new PointF(x, yOut);
+                    n++;
+                }
+                using (Pen pin = new Pen(Color.FromArgb(46, 110, 200), 2))
+                using (Pen pout = new Pen(Color.FromArgb(220, 120, 32), 2))
+                {
+                    if (n > 1) { g.DrawLines(pin, ptsIn); g.DrawLines(pout, ptsOut); }
+                    else
+                    {
+                        g.DrawEllipse(pin, ptsIn[0].X - 2, ptsIn[0].Y - 2, 4, 4);
+                        g.DrawEllipse(pout, ptsOut[0].X - 2, ptsOut[0].Y - 2, 4, 4);
+                    }
+                }
+                using (Font f9 = new Font("Microsoft YaHei", 9F))
+                using (SolidBrush bin = new SolidBrush(Color.FromArgb(46, 110, 200)))
+                using (SolidBrush bout = new SolidBrush(Color.FromArgb(220, 120, 32)))
+                {
+                    g.FillRectangle(bin, left + 8, top + 6, 10, 10);
+                    g.DrawString("下载/分钟", f9, bin, left + 22, top + 2);
+                    g.FillRectangle(bout, left + 118, top + 6, 10, 10);
+                    g.DrawString("上传/分钟", f9, bout, left + 132, top + 2);
+                }
+            }
+            catch { }
         }
 
         // =============================================================
@@ -1041,6 +1338,10 @@ namespace NetWatcher
                 {
                     if ((DateTime.Now - lastDateRebind).TotalSeconds >= 5) { lastDateRebind = DateTime.Now; RebindDate(); }
                 }
+                else if (tabs.SelectedTab == tpTrend)
+                {
+                    if ((DateTime.Now - lastTrendRebind).TotalSeconds >= 15) { lastTrendRebind = DateTime.Now; RebindTrend(); }
+                }
                 else if (tabs.SelectedTab == tpHist)
                 {
                     if ((DateTime.Now - lastHistRebind).TotalSeconds >= 15) { lastHistRebind = DateTime.Now; RebindHist(); }
@@ -1071,9 +1372,11 @@ namespace NetWatcher
             if (tabs == null || tabs.SelectedTab == null) return;
             DateTime now = DateTime.Now;
             lastProcRebind = now; lastDateRebind = now; lastHistRebind = now;
+            UpdateDateBar();
             if (tabs.SelectedTab == tpLive) RebindLive(curSnap);
             else if (tabs.SelectedTab == tpProc) RebindProc();
             else if (tabs.SelectedTab == tpDate) RebindDate();
+            else if (tabs.SelectedTab == tpTrend) RebindTrend();
             else if (tabs.SelectedTab == tpHist) RebindHist();
         }
 
@@ -1194,6 +1497,32 @@ namespace NetWatcher
             List<LiveIp> ips = new List<LiveIp>();
             List<LiveConn> conns = new List<LiveConn>();
 
+            // 2.2.0：活动筛选（全部 / 新出现 / 仅活跃 / 大流量 Top20 / 仅公网 / 长连接）
+            filtMode = ActivityFilter;
+            filtEst = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            filtLong = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            filtTop = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (snap != null && snap.Conns != null)
+            {
+                Dictionary<string, long> totals = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+                foreach (LiveConn c in snap.Conns)
+                {
+                    if (c == null) continue;
+                    if (c.State == "ESTABLISHED") filtEst.Add(c.Ip);
+                    if (c.DurationSeconds >= 60) filtLong.Add(c.Ip);
+                    long t = c.BytesIn + c.BytesOut;
+                    long old;
+                    if (!totals.TryGetValue(c.Ip, out old)) old = 0;
+                    totals[c.Ip] = old + t;
+                }
+                if (filtMode == 3)
+                {
+                    List<KeyValuePair<string, long>> tl = new List<KeyValuePair<string, long>>(totals);
+                    tl.Sort(delegate(KeyValuePair<string, long> a, KeyValuePair<string, long> b) { return b.Value.CompareTo(a.Value); });
+                    for (int i = 0; i < tl.Count && i < 20; i++) filtTop.Add(tl[i].Key);
+                }
+            }
+
             if (snap != null)
             {
                 if (snap.LiveIps != null)
@@ -1203,6 +1532,7 @@ namespace NetWatcher
                         if (li == null) continue;
                         if (!cfg.ShowLocalIp && li.IsLocal) continue;
                         if (!MatchLiveIp(q, li)) continue;
+                        if (!ActivityMatchIp(li)) continue;
                         if (pinnedIp.Length > 0 && string.Compare(li.Ip, pinnedIp, StringComparison.OrdinalIgnoreCase) != 0) continue;
                         ips.Add(li);
                     }
@@ -1214,6 +1544,7 @@ namespace NetWatcher
                         if (c == null) continue;
                         if (!cfg.ShowLocalIp && c.IsLocal) continue;
                         if (!MatchLiveConn(q, c)) continue;
+                        if (!ActivityMatchConn(c)) continue;
                         conns.Add(c);
                     }
                 }
@@ -1297,11 +1628,14 @@ namespace NetWatcher
             ApplySortGlyph(dgvIps, sortIps);
             ApplySortGlyph(dgvConns, sortConns);
 
+            string fname = ActivityFilterName();
             lblIpsTitle.Text = "各 IP 连接摘要（" + ips.Count + " 个 IP"
+                + (fname.Length > 0 ? " · 筛选: " + fname : "")
                 + (pinnedIp.Length > 0 ? " · IP 筛选: " + pinnedIp : "")
                 + (q.Length > 0 ? " · 搜索: " + q : "")
                 + "）   点击列头排序";
             lblConnsTitle.Text = "当前连接明细（" + conns.Count + " 条连接"
+                + (fname.Length > 0 ? " · 筛选: " + fname : "")
                 + (q.Length > 0 ? " · 搜索: " + q : "")
                 + "）   双击行 = 按该 IP 筛选上表";
 
@@ -1620,7 +1954,14 @@ namespace NetWatcher
                 connTotal += r.ConnCount;
             }
             string mode = d.bytesPrecise ? "逐IP精确" : "逐IP估算";
-            lblDateSummary.Text = date + "   下载 " + FmtBytes(d.bytesIn) + "   上传 " + FmtBytes(d.bytesOut)
+            if (d.sampleCount == 0 && ipCount == 0 && procCount == 0)
+            {
+                lblDateSummary.Text = DateLabel(date) + "   该日期没有采集数据"
+                    + (q.Length > 0 ? "（当前搜索：" + q + "）" : "")
+                    + "。程序需在该日运行并落盘后才有数据；也可用右上角日历选择其它日期。";
+                return;
+            }
+            lblDateSummary.Text = DateLabel(date) + "   下载 " + FmtBytes(d.bytesIn) + "   上传 " + FmtBytes(d.bytesOut)
                 + "   平均速率 ↓" + FmtRate(avgIn) + " ↑" + FmtRate(avgOut)
                 + "   峰值 ↓" + FmtRate(d.peakInBps) + " ↑" + FmtRate(d.peakOutBps)
                 + "   采样 " + d.sampleCount + " 次   字节来源：" + mode
@@ -1847,6 +2188,7 @@ namespace NetWatcher
             {
                 inSetDate = false;
             }
+            UpdateDateBar();
             if (tabs != null)
             {
                 if (tabs.SelectedTab == tpLive) RebindLive(curSnap);

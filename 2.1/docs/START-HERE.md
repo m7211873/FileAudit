@@ -1,7 +1,7 @@
 # START HERE · IP监控2.1 项目起点（给下一个智能体/接手者）
 
 > 归档时间：2026-10-31（北京时间）。**先读完这一页再动手**，可以省掉几小时试错。
-> 当前版本：**2.1.1（定版，2.1.1.0）**；2.1 是 2.0.2 的迭代修复版，代码/脚本/文档在 `2.1/` 子目录、
+> 当前版本：**2.2.0（2.2.0.0）**；2.1 是 2.0.2 的迭代修复版，代码/脚本/文档在 `2.1/` 子目录、
 > **已提交并推送 Gitee main**（提交号 `7b370b7`）。
 > 2.0 基线：Gitee `main` = `b7b3720`（2.0.2，冻结，不再改）。
 
@@ -29,7 +29,7 @@
 ```powershell
 cd D:\IP监控2.1版\NetWatcher\2.1
 
-# 1) 编译（产出 2.1\bin\NetWatcher.exe，版本资源 2.1.1.0）
+# 1) 编译（产出 2.1\bin\NetWatcher.exe，版本资源 2.2.0.0）
 cmd /c build.bat
 # 期望：[OK] bin\NetWatcher.exe built.（0 error / 0 warning）
 
@@ -55,17 +55,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\verify.ps1 -SkipGui
 2. **`docs/踩坑与决策记录.md`** —— 症状→根因→处理→证据 + ADR 决策表；**§八 是 2.1 新增的坑**
 3. **`docs/design-2.1.md`** —— 2.1 设计契约（已实现：数据模型/API/UI/单写锁/selftest/与 2.0 差异）
 4. **`docs/开发与维护指南.md`** —— 代码地图、启动顺序、数据模型、构建/签名/验收、扩展点
-5. `README.md`（功能与限制总览）、`CHANGELOG.md`（[2.1.1] 托盘修复/--quit、[2.1.0] 定版与两轮验收结果）
+5. `README.md`（功能与限制总览）、`CHANGELOG.md`（[2.2.0] 智能日期行/活动筛选/趋势页、[2.1.1] 托盘修复/--quit、[2.1.0] 定版）
 6. 改 UI 时看 `docs/用户手册.md`（含截图与文案对照；截图暂用 2.0，已标注）
 
 ---
 
 ## 3. 一句话现状
 
-IP监控2.1 **已定版（2.1.1）**：2.0 的能力（单 exe、四标签页、按日原子落盘、诚实降级、托盘自启）全部保留；
+IP监控2.1 **已定版（2.2.0）**：2.0 的能力（单 exe、五标签页（2.2.0 新增趋势）、按日原子落盘、诚实降级、托盘自启）全部保留；
 P0 四项与 P1 八项修复全部落地并冻结，两轮独立回归验收通过
 （P0 29/29、P1 38/38、P1 后 P0 复跑 29/29，0 FAIL/0 WARN；GUI 冒烟 39 PASS，2 项 FAIL 为环境归因）。
-版本 2.1.1.0、标题 `IP监控2.1`、已用 2.0 同一张证书签名（Authenticode `Valid`）。
+版本 2.2.0.0、标题 `IP监控2.1`、已用 2.0 同一张证书签名（Authenticode `Valid`）。
 **唯一能力缺口仍是"逐 IP 精确流量"**（依赖 Windows `GetPerTcpConnectionEStats`，开发机实测不可用，
 程序诚实降级为「估算」并标注，不会谎报精确；精确只覆盖 IPv4 TCP，IPv6/UDP 只计总流量）。
 **交付动作已完成**：真机安装/卸载验收（见 `docs/2.1-真机验收补记.md`）、Gitee + GitHub push；剩下 P2 体验项（见 §6）。
@@ -129,7 +129,7 @@ P0 四项与 P1 八项修复全部落地并冻结，两轮独立回归验收通�
 NetWatcher/                     # Gitee 仓库根（2.0 冻结）
 ├── src/ docs/ bin/ ...         # 2.0（不许改）
 └── 2.1/                        # 本版：IP监控2.1（2.1.0 定版）
-    ├── src/                    9 个 C# 源文件 + AssemblyInfo.cs（2.1.1.0）
+    ├── src/                    9 个 C# 源文件 + AssemblyInfo.cs（2.2.0.0）
     ├── bin/NetWatcher.exe      产物（已编译 + 用 2.0 证书签名）
     ├── build.bat / build-and-sign.bat
     ├── install.ps1 / uninstall.ps1   （2.1 化：只动 NetWatcher2.1 的目录/Run 值/快捷方式）
