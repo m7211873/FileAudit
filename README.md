@@ -9,6 +9,22 @@
 - **诚实标注**：普通权限下逐 IP 流量是「估算」，管理员权限下 EStats 可用才是「精确」，界面上明确区分。
 
 > **2.0 的核心变化**：修正 1.0「EStats 失败被静默吞掉、仍无条件标记 `precise=true`（谎报精确）」的问题——2.0 按 EStats 的实际返回值判断，失败会写日志并在界面诚实降级为「估算」；采样从 60 秒缩短到默认 2 秒（可选 1/2/5/10/30/60 秒）；连接记录范围扩大到所有「有远端地址」的 TCP 状态（只排除 LISTEN）；界面重排（四个标签页可见、列头排序、搜索、新 IP 标记）；数据改为原子写盘；区分「真实会话数」与「采样次数」。**注意：精确模式能否生效取决于本机 EStats 是否可用，不是 2.0 保证一定可用。**
+>
+> **当前版本：2.0.2**（安装到 `%LOCALAPPDATA%\Programs\NetWatcher` 运行，修复"从受限目录运行无法写数据"）。变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 文档索引
+
+| 文档 | 给谁看 | 内容 |
+|---|---|---|
+| [docs/用户手册.md](docs/用户手册.md) | 普通用户 | 安装、界面截图导览、常见任务、FAQ、故障排查 |
+| [docs/踩坑与决策记录.md](docs/踩坑与决策记录.md) | 开发者/接手者 | 症状→根因→处理→证据，以及 ADR 决策表（**最值得先读**） |
+| [docs/开发与维护指南.md](docs/开发与维护指南.md) | 开发者 | 代码地图、启动顺序、数据模型、构建/签名/验收、扩展点 |
+| [docs/交接说明.md](docs/交接说明.md) | 接手者 | 当前状态、提交记录、待办、验收证据、下次怎么继续 |
+| [docs/design-2.0.md](docs/design-2.0.md) | 开发者 | 2.0 设计契约（数据模型/API/UI 要求/验收标准） |
+| [CHANGELOG.md](CHANGELOG.md) | 所有人 | 版本变更与对应提交 |
+| [tools/sign/README.md](tools/sign/README.md) | 发布者 | 自签名用法 + 2026 商业证书调研（OV/EV/SignPath/Certum/Azure） |
+| [tools/qa/README.md](tools/qa/README.md) | 开发者 | 一键验收脚本用法与 17 类检查项 |
+
 
 ---
 
@@ -132,7 +148,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
 | **估算** | 其它情况（含普通权限） | 按 ESTABLISHED TCP 连接数均分整机总流量 | 逐IP估算（橙色） |
 
 - **判据**：只有**确实有一条连接成功读到 EStats** 才显示「精确」。这是对 1.0 bug 的修正——1.0 会无条件标记 `precise=true`，EStats 失败被静默吞掉，造成「逐 IP 字节恒为 0 却显示精确」；2.0 按实际返回值判断，失败时显示**橙色「逐IP估算」**，鼠标悬停可看到最近一次失败原因（`LastEStatsError`）。
-- 首次 EStats 失败会把返回码 / Windows 错误码写入数据目录下的 `monitor.log`，便于诊断。
+- EStats 失败时：状态栏显示红色错误、运行模式悬浮提示里有诊断信息；要完整的参数矩阵诊断
+  （`rw=1/4 × rod=48/16/1024` 各组合的 rc/winerr），请以管理员身份运行 `--selftest`，
+  看 `selftest.log` 里的 `EStats 结论:` 行。`monitor.log` 只记录采样/写盘异常。
 - **EStats 在部分机器/系统上可能不可用**：非管理员通常返回 `ERROR_NOT_SUPPORTED (50)`；管理员也可能失败，返回 `ERROR_NOT_SUPPORTED (50)` / `ERROR_INVALID_USER_BUFFER (1784)`（例如装有网络加速器、LSP/WFP 过滤驱动的环境）。以管理员身份运行 `NetWatcher.exe --selftest`，看 `selftest.log` 里的 `EStats 结论:` 一行即可确认本机是否支持；不可用时程序自动退回「估算」，**不会谎报精确**。
 
 ### 3.2 为什么普通权限拿不到逐 IP 精确字节
@@ -165,7 +183,7 @@ Windows 的 TCP 连接表能列出远端的 TCP 连接；而 **UDP 是无连接�
 | `data\YYYY-MM-DD.json` | 每天的统计（JSON，可直接查看）；含总流量、逐 IP、逐进程、采样曲线 |
 | `config.json` | 配置（扫描间隔、保留天数、归属地开关等） |
 | `geocache.json` | IP 归属地缓存 |
-| `monitor.log` | 运行日志（含 EStats 失败诊断） |
+| `monitor.log` | 运行日志（采样/写盘异常；EStats 诊断见 `selftest.log`） |
 | `startup.log` | 启动阶段时间线（用于排查“进程在但没界面 / 没采集”） |
 | `crash.log` | 未处理异常导致的崩溃日志（排查用） |
 | `ui-error.log` | 界面/UI 线程异常日志（排查用） |
