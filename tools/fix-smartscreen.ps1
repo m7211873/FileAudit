@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Exe = 'C:\Users\m7211\Documents\deepseek-harness\default-workspace\NetWatcher\bin\NetWatcher.exe'
 )
 # ============================================================

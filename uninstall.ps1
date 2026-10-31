@@ -15,6 +15,7 @@
 # ============================================================
 param(
     [switch]$DeleteData,
+    [switch]$KeepBinary,
     [string]$DataDir = ''
 )
 
@@ -22,12 +23,23 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $Root         = $PSScriptRoot
-$Exe          = Join-Path $Root 'bin\NetWatcher.exe'
+$BinExe       = Join-Path $Root 'bin\NetWatcher.exe'
+$InstallDir   = Join-Path $env:LOCALAPPDATA 'Programs\NetWatcher'
+$InstalledExe = Join-Path $InstallDir 'NetWatcher.exe'
+# install.ps1 会把程序复制到 LocalAppData 再运行；优先用安装副本
+if (Test-Path -LiteralPath $InstalledExe) { $Exe = $InstalledExe } else { $Exe = $BinExe }
 $ShortcutName = 'IP监控.lnk'
 $RunKeyPath   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $RunValueName = 'NetWatcher'
 
 $script:ExitCode = 0
+
+# 判断某个进程路径是否属于本程序（安装副本或仓库 bin 都算）
+function Test-OurExe([string]$Path) {
+    if ([string]::IsNullOrEmpty($Path)) { return $false }
+    return $Path.Equals($InstalledExe, [System.StringComparison]::OrdinalIgnoreCase) -or
+           $Path.Equals($BinExe, [System.StringComparison]::OrdinalIgnoreCase)
+}
 
 function Write-Step([string]$Message) { Write-Host ">> $Message" -ForegroundColor Cyan }
 function Write-Ok([string]$Message)   { Write-Host "   $Message" -ForegroundColor Green }
@@ -115,7 +127,7 @@ if ($processes.Count -eq 0) {
             Write-Warn ("无法读取 PID {0} 的可执行路径（可能受保护/权限不足），跳过；请在托盘右键退出该实例。" -f $procId)
             continue
         }
-        if (-not $procPath.Equals($Exe, [System.StringComparison]::OrdinalIgnoreCase)) {
+        if (-not (Test-OurExe $procPath)) {
             $skipped++
             Write-Ok ("跳过非本安装的 NetWatcher 进程 PID {0}: {1}" -f $procId, $procPath)
             continue
@@ -133,7 +145,7 @@ if ($processes.Count -eq 0) {
     $left = @(Get-Process -Name 'NetWatcher' -ErrorAction SilentlyContinue | Where-Object {
         $lp = ''
         try { $lp = [string]$_.Path } catch { $lp = '' }
-        $lp -ne '' -and $lp.Equals($Exe, [System.StringComparison]::OrdinalIgnoreCase)
+        Test-OurExe $lp
     })
     if ($left.Count -gt 0) {
         Write-Warn ("还有 {0} 个本安装的 NetWatcher 进程在运行（可能以管理员身份启动）。" -f $left.Count)
@@ -232,6 +244,34 @@ if ($DeleteData) {
     Write-Ok ("数据目录: {0}" -f $DataDir)
 }
 
+# ---- 5) 删除安装目录（%LOCALAPPDATA%\Programs\NetWatcher）----
+if ($KeepBinary) {
+    Write-Step '保留程序文件（-KeepBinary）'
+    Write-Ok ("安装目录: {0}" -f $InstallDir)
+} else {
+    Write-Step ("删除安装目录: {0}" -f $InstallDir)
+    if (Test-Path -LiteralPath $InstallDir) {
+        try {
+            # 先删我们自己复制进去的文件，再删空目录（不碰用户自己放进去的东西）
+            foreach ($f in @('NetWatcher.exe', 'app.ico')) {
+                $p = Join-Path $InstallDir $f
+                if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+            }
+            $rest = @(Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue)
+            if ($rest.Count -eq 0) {
+                Remove-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue
+                Write-Ok '安装目录已删除'
+            } else {
+                Write-Warn ("安装目录里还有其它文件，未整体删除: {0}" -f $InstallDir)
+            }
+        } catch {
+            Write-Warn ("删除安装目录失败: {0}" -f $_.Exception.Message)
+        }
+    } else {
+        Write-Ok '安装目录不存在，跳过'
+    }
+}
+
 # ---- 完成 ----
 Write-Host ''
 if ($script:ExitCode -eq 0) {
@@ -247,6 +287,6 @@ if (-not $DeleteData) {
     Write-Host ("  数据仍保留在: {0}" -f $DataDir)
     Write-Host '  如需连同数据一起删除： uninstall.ps1 -DeleteData'
 }
-Write-Host '  程序文件（bin 文件夹）未被删除，需要的话手工删除即可。'
+Write-Host '  数据保留策略见上方提示；程序文件按 -KeepBinary 决定是否保留。'
 Write-Host ''
 exit $script:ExitCode

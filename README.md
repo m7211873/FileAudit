@@ -86,31 +86,39 @@
 
 底部还有：**导出CSV**、**打开数据目录**、**以管理员身份重启**（用于切换到精确模式）。
 
-### 2.6 安装与卸载（可选）
+### 2.6 安装与卸载（推荐）
 
 仓库根目录提供两个 PowerShell 脚本（Windows 自带组件，无需安装任何东西）：
 
 ```powershell
-# 安装：创建数据目录 + 注册开机自启 + 桌面「IP监控」快捷方式
+# 安装：复制程序到 %LOCALAPPDATA%\Programs\NetWatcher + 数据目录 + 开机自启 + 桌面「IP监控」快捷方式
 powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
 
 # 可选参数
 #   -NoShortcut            不创建桌面快捷方式
+#   -Portable              绿色模式：不复制程序，原地运行（快捷方式/自启指向当前 bin 目录）
 #   -DataDir "D:\NetWatcherData"   使用自定义数据目录
 
-# 卸载：结束进程 + 删除开机自启 + 删除桌面快捷方式（默认保留数据）
+# 卸载：结束进程 + 删除开机自启 + 删除桌面快捷方式 + 删除安装目录（默认保留数据）
 powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
 
-# 连同数据一起删除（谨慎！）
-powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1 -DeleteData
+# 可选参数
+#   -KeepBinary            保留 %LOCALAPPDATA%\Programs\NetWatcher 下的程序文件
+#   -DeleteData            连同数据目录一起删除（谨慎！）
 ```
 
 两个脚本都可以**重复执行**（幂等）；安装/卸载都不需要管理员权限。
 
-- 安装时：会创建桌面「IP监控」快捷方式，并**删除 1.0 遗留的同程序快捷方式「NetWatcher.lnk」**（只在确认它指向本程序时才删）。
-- 卸载时：会结束**本安装目录启动的** NetWatcher 进程（不会误杀其它位置的副本），并删除「IP监控.lnk」和 1.0 遗留的「NetWatcher.lnk」。
+- **安装为什么要把程序复制到 `%LOCALAPPDATA%\Programs\NetWatcher`**：
+  从"受限目录"（例如被安全软件/沙箱管辖的目录、临时目录、网络盘）直接运行，程序可能**无法写入 `%APPDATA%\NetWatcher`**，
+  表现为"进程在运行、但没数据 / 托盘异常 / IP 列表很少"。复制到本地程序目录后不会再遇到这个问题。
+  想保持绿色版原地运行就加 `-Portable`。
+- 安装时：会创建桌面「IP监控」快捷方式（指向安装目录），并**删除 1.0 遗留的同程序快捷方式「NetWatcher.lnk」**（只在确认它指向本程序时才删）。
+- 卸载时：会结束**本程序（安装目录或仓库 bin）启动的** NetWatcher 进程（不会误杀其它位置的副本），并删除「IP监控.lnk」和 1.0 遗留的「NetWatcher.lnk」。
+- 重装/升级：重新跑一次 `install.ps1` 即可（会覆盖安装目录里的程序，数据不受影响）。
 
 > 注意：如果用 `-DataDir` 指定了自定义数据目录，卸载时也要带上同样的 `-DataDir`，`-DeleteData` 才会删除那个目录。
+
 
 ---
 

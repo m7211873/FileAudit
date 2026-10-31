@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 #  IP监控2.0（NetWatcher）安装脚本
 #  纯系统自带组件（PowerShell + WScript.Shell），无需管理员权限。
 #
@@ -16,6 +16,7 @@
 # ============================================================
 param(
     [switch]$NoShortcut,
+    [switch]$Portable,
     [string]$DataDir = ''
 )
 
@@ -127,6 +128,30 @@ try {
         Write-Ok '已解除程序的"下载"标记（避免 SmartScreen 拦截）'
     }
 } catch { }
+
+# ---- 0.5) 复制到安装目录 ----
+# 重要：直接从"受限目录"（例如被沙箱/安全软件管辖的目录、临时目录、网络盘）运行，
+#       程序可能无法写 %APPDATA%，表现为"进程在、没数据、托盘异常"。
+#       因此默认把程序复制到 %LOCALAPPDATA%\Programs\NetWatcher 后再注册快捷方式/自启。
+#       想保持"绿色版、原地运行"，加 -Portable。
+if (-not $Portable) {
+    $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\NetWatcher'
+    Write-Step ("安装到: {0}" -f $InstallDir)
+    try {
+        New-Item -ItemType Directory -Path $InstallDir -Force -ErrorAction Stop | Out-Null
+        Copy-Item -LiteralPath $Exe -Destination (Join-Path $InstallDir 'NetWatcher.exe') -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $Icon) {
+            Copy-Item -LiteralPath $Icon -Destination (Join-Path $InstallDir 'app.ico') -Force -ErrorAction Stop
+        }
+        $Exe = Join-Path $InstallDir 'NetWatcher.exe'
+        $Icon = Join-Path $InstallDir 'app.ico'
+        Write-Ok '程序已复制到安装目录（之后快捷方式/开机自启都指向这里）'
+    } catch {
+        Write-Warn ("复制到安装目录失败，将从原位置运行: {0}" -f $_.Exception.Message)
+    }
+} else {
+    Write-Step '绿色模式（-Portable）：原地运行，不复制'
+}
 
 # ---- 1) 数据目录 ----
 if ([string]::IsNullOrWhiteSpace($DataDir)) {
