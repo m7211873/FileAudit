@@ -25,6 +25,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\verify.ps1 -Screens
 | P1 回归 `regression-p1.ps1` | **PASS=38 FAIL=0 WARN=0**（tag `20261031-163501`，R6~R11 + 8 项静态检查） | `out/regression_p1_*.txt` |
 | 无界面验收 `verify.ps1 -SkipGui -Seconds 30` | PASS=24 FAIL=2 WARN=2（tag `20261031-163622`） | `out/report_20261031-163622.txt` |
 | GUI 冒烟 `verify.ps1 -Seconds 20 -MutexTag p1qa` | **PASS=39** FAIL=2 WARN=2（tag `20261031-163730`） | `out/report_20261031-163730.txt`、`out/gui_*_20261031-163730.png` |
+| 启动顺序回归 `regression-activation.ps1` | **PASS=9 FAIL=0 WARN=0**（2026-10-31，二次启动唤出 / 不同 tag 冲突 / daemon exit=2） | 同目录脚本输出 |
 
 - 两轮共 4 个 FAIL **全部为环境归因，不是产品缺陷**（判据未削弱、未改判）：
   1. `SELFTEST_GEOIP`：本机到 `ip-api.com` 间歇不可达（脚本已自动重试一次；同批 GUI run 该检查曾 PASS）；
@@ -164,3 +165,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\verify.ps1 -SkipGui
 ## 证据文件
 
 `out/` 下每次运行一组（`report_<tag>.txt/.json`、`build_<tag>.log`、`selftest_<tag>.log`、`controls_<tag>.txt/.json`、`gui_main_<tag>.png`、`gui_tab1..4_<标签>_<tag>.png`）。截图均为 `PrintWindow` 窗口真实渲染。
+
+## 2.1 启动顺序回归（`regression-activation.ps1`）
+
+用于锁定「单实例唤出」与「数据写锁」的先后顺序（P0-4 修正后的行为，2026-10-31 新增）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\regression-activation.ps1
+```
+
+- A1~A3：`StartMinimized` 隐藏启动 + `--show` 二次启动 → 唤出窗口、二次进程退出；
+- B1~B2：普通二次启动同样唤出并退出；
+- C1~C2：不同 `--mutex-tag` 抢同一 datadir → 第二个实例提示“数据目录被占用”、首个实例不受影响；
+- D1：GUI 占 datadir 时 `--daemon` 退出码 = 2；
+- E1：清理检查。
+- 2026-10-31 基线：`RESULT: PASS  PASS=9 FAIL=0 WARN=0`。

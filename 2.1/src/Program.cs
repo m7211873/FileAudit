@@ -137,34 +137,20 @@ namespace NetWatcher
                 string effectiveDir = cfg.EffectiveDataDir();
                 Store.Init(effectiveDir);
 
-                // 2.1 修复（P0-4）：同一数据目录只允许一个写入实例（GUI 与 --daemon 都抢）。
+                // 2.1 修复（P0-4）：同一数据目录只允许一个写入实例。
+                // 注意：GUI 的写锁必须在「单实例唤出」判断之后才抢（见下方），否则第二次双击启动
+                // 会先报"数据目录被占用"，把 2.0 时代的"重复双击 = 唤出已有窗口"体验弄坏。
                 // --selftest 已改为只读（不写 data\、不改注册表），因此不参与该锁。
-                bool gotDataLock = selfTest || Store.AcquireDataLock();
-                if (!gotDataLock && !selfTest && daemonSeconds <= 0)
-                {
-                    // 管理员重启/升级时旧实例可能正在退出：GUI 最多等 5 秒接管数据目录
-                    for (int i = 0; i < 20 && !gotDataLock; i++) { Thread.Sleep(250); gotDataLock = Store.AcquireDataLock(); }
-                }
-                if (!selfTest && !gotDataLock)
+                if (daemonSeconds > 0 && !Store.AcquireDataLock())
                 {
                     string busy = "数据目录已被另一个 IP监控 实例占用，为避免互相覆盖，本次实例不启动：" + effectiveDir;
-                    AppendStartup(effectiveDir, "Program: " + busy + " (lock=" + Store.DataLockName + ")");
-                    if (daemonSeconds > 0)
+                    AppendStartup(effectiveDir, "Program: daemon " + busy + " (lock=" + Store.DataLockName + ")");
+                    try
                     {
-                        try
-                        {
-                            File.AppendAllText(Path.Combine(effectiveDir, "daemon.log"),
-                                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " daemon 放弃启动: " + busy + "\r\n");
-                        }
-                        catch { }
-                        Environment.ExitCode = 2;
-                        return;
+                        File.AppendAllText(Path.Combine(effectiveDir, "daemon.log"),
+                            DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " daemon 放弃启动: " + busy + "\r\n");
                     }
-                    if (!background)
-                    {
-                        try { MessageBox.Show(busy + "\n\n请先退出另一个实例；测试请用 --datadir 指定独立目录。", "IP监控2.1", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
-                        catch { }
-                    }
+                    catch { }
                     Environment.ExitCode = 2;
                     return;
                 }
@@ -217,10 +203,16 @@ namespace NetWatcher
                         }
                     }
                     catch { }
-                    // 等 1.5 秒确认窗口真的出来了；若第一个实例卡死（历史 bug），给出可操作的提示
-                    Thread.Sleep(1500);
-                    IntPtr h = FindWindow(null, MainWindowTitle);
-                    if (signaled && h != IntPtr.Zero && IsWindowVisible(h)) return;
+                    // 最多等 5 秒确认窗口真的出来了（第一个实例 UI 忙时 1.5 秒可能不够）；
+                    // 若第一个实例确实卡死，再给出可操作的提示（历史 bug 的兜底）。
+                    bool windowShown = false;
+                    for (int i = 0; i < 25 && !windowShown; i++)
+                    {
+                        Thread.Sleep(200);
+                        IntPtr h = FindWindow(null, MainWindowTitle);
+                        if (h != IntPtr.Zero && IsWindowVisible(h)) windowShown = true;
+                    }
+                    if (signaled && windowShown) return;
                     try
                     {
                         MessageBox.Show(
@@ -232,6 +224,26 @@ namespace NetWatcher
                             "IP监控2.1", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     }
                     catch { }
+                    return;
+                }
+
+                // 2.1 修复（P0-4）：GUI 抢数据目录写锁（放在单实例唤出逻辑之后，保证双击唤出不被误报占用）。
+                bool gotGuiDataLock = Store.AcquireDataLock();
+                if (!gotGuiDataLock)
+                {
+                    // 管理员重启/升级时旧实例可能正在退出：最多等 5 秒接管数据目录
+                    for (int i = 0; i < 20 && !gotGuiDataLock; i++) { Thread.Sleep(250); gotGuiDataLock = Store.AcquireDataLock(); }
+                }
+                if (!gotGuiDataLock)
+                {
+                    string busy = "数据目录已被另一个 IP监控 实例占用，为避免互相覆盖，本次实例不启动：" + effectiveDir;
+                    AppendStartup(effectiveDir, "Program: GUI " + busy + " (lock=" + Store.DataLockName + ")");
+                    if (!background)
+                    {
+                        try { MessageBox.Show(busy + "\n\n请先退出另一个实例；测试请用 --datadir 指定独立目录。", "IP监控2.1", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+                        catch { }
+                    }
+                    Environment.ExitCode = 2;
                     return;
                 }
 

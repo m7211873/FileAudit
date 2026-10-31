@@ -68,7 +68,7 @@ P0 四项与 P1 八项修复全部落地并冻结，两轮独立回归验收通�
 版本 2.1.0.0、标题 `IP监控2.1`、已用 2.0 同一张证书签名（Authenticode `Valid`）。
 **唯一能力缺口仍是"逐 IP 精确流量"**（依赖 Windows `GetPerTcpConnectionEStats`，开发机实测不可用，
 程序诚实降级为「估算」并标注，不会谎报精确；精确只覆盖 IPv4 TCP，IPv6/UDP 只计总流量）。
-**剩下的是交付动作**：真机安装/卸载、Gitee push、P2 体验项（见 §6）。
+**交付动作已完成**：真机安装/卸载验收（见 `docs/2.1-真机验收补记.md`）、Gitee + GitHub push；剩下 P2 体验项（见 §6）。
 
 ---
 
@@ -115,9 +115,8 @@ P0 四项与 P1 八项修复全部落地并冻结，两轮独立回归验收通�
 
 ## 6. 待办（按价值排序，详见 `docs/2.1-交接说明.md` §六）
 
-1. **真机安装/卸载验证**（需用户先退出 2.0）：`install.ps1` → 启动 → 数据落盘 → `uninstall.ps1`（保留数据）→ 重装；
-   并确认 2.0 的目录/自启/快捷方式/数据零变化（脚本目前仅静态审查 + PS 5.1 Parser 0 error）。
-2. **Gitee 提交/push**（Lead）：`git add 2.1 && git commit`，补提交号；GitHub 镜像已同步（与 Gitee 同一 main 提交）。
+1. ~~真机安装/卸载验证~~ **已完成**（2026-10-31 21:4x；含真实数据续接、uninstall 保留数据、重装验证）。
+2. ~~Gitee 提交/push~~ **已完成**（Gitee 与 GitHub 同一 main 提交）。
 3. **P2 体验项**：列宽记忆、历史趋势图（`samples` 分钟桶已在 JSON 里）、CSV 导出范围选择。
 4. **长期**：ETW 逐 IP/逐进程统计（覆盖 UDP/QUIC）；对外分发签名（SignPath / Certum）。
 5. **可选**：重截 2.1 真机截图替换 `docs/screenshots/`（当前仍是 2.0 截图并已标注）。
@@ -158,7 +157,7 @@ NetWatcher/                     # Gitee 仓库根（2.0 冻结）
 | 4 个 FAIL 的环境归因（GEOIP 网络间歇 / 用户 2.0 实例 PID 10856 写真实数据） | `report_*.txt` 的 FAIL 行、`control_realdata_p2*.txt` 对照组 |
 | 详细验收报告 | `D:\IP监控2.1版\_analysis\2.1-P0-验收.md`、`2.1-P1-验收.md` |
 | 2.0 基线 headless PASS=27 / FAIL=0（历史对照） | `tools/qa/out/report_*.txt`（2.0 时期） |
-| 安装/卸载边界静态审查 | `2.1\install.ps1` / `2.1\uninstall.ps1`（PS 5.1 Parser 0 error、UTF-8 BOM） |
+| 安装/卸载真机验收 | install → 启动/真实数据续接 → uninstall 保留数据 → 重装（2026-10-31），见 `2.1-真机验收补记.md` |
 | 签名 | `2.1\bin\NetWatcher.exe` Authenticode `Valid`（`CN=NSYBdeDFY NetWatcher`） |
 
 ---

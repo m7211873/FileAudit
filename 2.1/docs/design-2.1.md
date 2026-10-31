@@ -169,6 +169,11 @@ class Monitor {
 - 设计意图：测试/截图用 `--datadir <临时绝对目录>` 并行跑多个实例；正式使用同一目录只能一个写者。
 
 ### 5.3 启动顺序（2.1 实际顺序）
+
+> **2026-10-31 修正（已实现）**：GUI 的数据写锁在「单实例唤出判断」**之后**才抢（`--daemon` 仍在启动早期抢），
+> 否则二次启动（双击 / `--show`）会先报“数据目录被占用”而无法唤出已有窗口。
+> 回归：`tools/qa/regression-activation.ps1`（9/9 PASS）。
+
 ```
 Main(args)
  ├─ 解析参数（--background/--datadir/--mutex-tag/--selftest/--daemon/--autostart-*/--show）
@@ -263,7 +268,7 @@ P1 已实现：
 | 编号 | 待办 | 说明 |
 |---|---|---|
 | P2 | 体验项 | 列宽记忆、历史趋势图（`samples` 分钟桶已在 JSON 里）、CSV 导出范围等 |
-| 交付-1 | 真机安装/卸载验证 | 需用户先退出 2.0；脚本目前仅静态审查 + PS 5.1 Parser 0 error |
+| 交付-1 | 真机安装/卸载验证 | ✅ 2026-10-31 真机通过（install→数据续接→uninstall 保留数据→重装），见 `2.1-真机验收补记.md` |
 | 交付-2 | 打包与发布 | `IP监控2.1-发布包.zip`、Gitee/GitHub 已推送（两远端 main 一致） |
 | 限制-1 | 管理员重启/UAC | P1-7 无法自动化，仅静态检查 |
 | 限制-2 | EStats 成功路径 | 本机非管理员不可用（`rc=50/winerr=122`），P1-12 仅静态检查 |
@@ -290,11 +295,10 @@ P1 已实现：
       `--selftest` 不被写锁阻塞；`--mutex-tag` 不绕过写锁
 - [x] **P1-5~P1-12**：回归 38/38 PASS（P1-7/11/12 为静态证据，已如实记录）
 - [x] 数据原子写入；`verify.ps1` 数据链路检查全 PASS（逐 IP 对账误差 0、分钟桶上限、无残留 .tmp）
-- [ ] `2.1\install.ps1` / `uninstall.ps1` 可重复执行且幂等；**只动 NetWatcher2.1**（静态审查 + Parser 0 error 已完成；
-      **真机安装/卸载待用户退出 2.0 后验证**）
+- [x] `2.1\install.ps1` / `uninstall.ps1` 幂等；**只动 NetWatcher2.1**（PS 5.1 Parser 0 error；**2026-10-31 真机安装/卸载验收通过**，见 `2.1-真机验收补记.md`）
 - [x] 签名：`bin\NetWatcher.exe` 用 **2.0 已有证书**签名成功，Authenticode `Valid`
 - [x] 文档齐套且版本号统一 2.1.0：README / CHANGELOG / START-HERE / design-2.1 / 用户手册 / 开发与维护指南 / 踩坑记录 / 2.1-交接说明
-- [ ] 提交「IP监控2.1」到 Gitee（`2.1/` 文件夹，与 2.0 并列；根目录 2.0 文件不动）——**已推送 Gitee main，提交号 `7b370b7`**
+- [x] 提交「IP监控2.1」到 Gitee（`2.1/` 文件夹，与 2.0 并列；根目录 2.0 文件不动）——**已推送 Gitee + GitHub（两远端 main 一致）**
 
 ## 12. 与 2.0 的差异（汇总）
 

@@ -157,8 +157,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
 
 两个脚本都可以**重复执行**（幂等）；安装/卸载都不需要管理员权限。
 
-> 2.1 的安装/卸载脚本已通过 **Windows PowerShell 5.1 Parser 校验（0 语法错误）** 与静态审查；
-> 受用户机上 2.0 实例仍在运行影响，**真机安装/卸载尚未执行**（升级前请先退出 2.0，见下）。
+> 2.1 的安装/卸载脚本已通过 **Windows PowerShell 5.1 Parser 校验（0 语法错误）**，并已于 **2026-10-31 真机完成安装/卸载验收**
+> （install → 启动/数据续接 → uninstall 保留数据 → 重装；升级前仍请先退出 2.0，见下）。
 
 **2.1 与 2.0 的边界（脚本刻意保证）**：
 
