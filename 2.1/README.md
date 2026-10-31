@@ -394,3 +394,12 @@ NetWatcher/                  # Gitee 仓库根；这里的 2.0 文件一律不�
     ├── docs/                # START-HERE / design-2.1 / 用户手册 / 开发维护 / 踩坑记录 / 2.1-交接说明
     └── tools/               # sign（自签名）、qa（verify.ps1 一键验收 + regression-p0/p1.ps1 回归）、fix-smartscreen.ps1
 ```
+
+---
+
+## 发布包与镜像
+
+- **GitHub Release（推荐下载）**：https://github.com/m7211873/FileAudit/releases/tag/v2.1.0
+  （附件 `NetWatcher-2.1.0-release.zip`，即 `IP监控2.1-发布包.zip`：签名 exe + 安装/卸载脚本 + 全套文档 + 验收证据）
+- **Gitee 仓库**：https://gitee.com/NSYBdeDFY/FileAudit/tree/main/2.1
+- **GitHub 仓库**：https://github.com/m7211873/FileAudit/tree/main/2.1
