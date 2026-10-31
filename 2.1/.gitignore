@@ -1,0 +1,9 @@
+# 2.1 独立工程的忽略规则（相对本目录）
+testdata/
+*.log
+obj/
+bin/autostart-error.log
+bin/monitor.log
+tools/qa/out/
+tools/sign/out/
+tools/sign/test/
