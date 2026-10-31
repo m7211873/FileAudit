@@ -1,15 +1,10 @@
-# 运行时生成 / 机器相关，不入库
-config.ps1
-state.json
-export.log
-.export.lock
+# 运行时数据与测试数据
+testdata/
 
-# 日志与输出目录
-events/
-tamper/
-reports/
-assets/
+# 日志文件
+*.log
 
-# 系统文件
-Thumbs.db
-Desktop.ini
+# 编译中间产物
+obj/
+bin/autostart-error.log
+bin/monitor.log
