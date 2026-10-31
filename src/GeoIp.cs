@@ -11,6 +11,7 @@ namespace NetWatcher
     public class GeoInfo
     {
         public string Country = "", Region = "", City = "", Isp = "", Lat = "", Lon = "";
+        public string Host = "";     // 预留：反向解析/域名（当前版本为空）
         public string Source = ""; // local / cache / pending / disabled / error
 
         public string Display()
@@ -153,9 +154,11 @@ namespace NetWatcher
                 lock (Lock) { if (Cache.ContainsKey(ip)) return true; }
                 string url = string.Format(ApiFormat, Uri.EscapeDataString(ip));
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
-                req.Timeout = 5000;
-                req.ReadWriteTimeout = 5000;
-                req.UserAgent = "NetWatcher/1.0";
+                // 关键：本机系统代理可能指向不可用地址，必须显式绕过，否则必然超时
+                req.Proxy = null;
+                req.Timeout = 8000;
+                req.ReadWriteTimeout = 8000;
+                req.UserAgent = "NetWatcher/2.0";
                 using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
                 using (StreamReader sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
                 {
@@ -167,11 +170,17 @@ namespace NetWatcher
                         lock (Lock) { Cache[ip] = d; SaveCache(); }
                         return true;
                     }
+                    LastError = "status!=success: " + (s.Length > 120 ? s.Substring(0, 120) : s);
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                LastError = ex.GetType().Name + ": " + ex.Message;
+            }
             return false;
         }
+
+        public static string LastError = "";
 
         static void SaveCache()
         {

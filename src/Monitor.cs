@@ -1,58 +1,82 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading;
 
 namespace NetWatcher
 {
-    public class LiveIp
-    {
-        public string Ip = "", City = "", Region = "", Country = "", Isp = "";
-        public int ConnCount = 0;
-        public long SpeedInBps = 0, SpeedOutBps = 0;
-        public long BytesInDelta = 0, BytesOutDelta = 0;
-    }
+    // ---------- UI 只读快照 ----------
 
     public class LiveConn
     {
-        public string Ip = "", ProcessName = "", State = "", Proto = "";
-        public int RemotePort = 0, LocalPort = 0, Pid = 0;
-        public string City = "", Region = "", Country = "", Isp = "";
-        public long BytesIn = 0, BytesOut = 0;          // 累计（估算或精确）
-        public long DurationSeconds = 0;                 // 连接持续时间
-        public long SpeedInBps = 0, SpeedOutBps = 0;     // 本采样速率
+        public string Ip = "", ProcessName = "", ProcessPath = "", State = "", Proto = "";
+        public string City = "", Region = "", Country = "", Isp = "", Hostname = "";
+        public int Pid = 0, RemotePort = 0, LocalPort = 0;
+        public long BytesIn = 0, BytesOut = 0;              // 连接生命周期内累计（精确或估算）
+        public long SpeedInBps = 0, SpeedOutBps = 0;         // 本采样速率
+        public long DurationSeconds = 0;
+        public long FirstSeenUnix = 0;
+        public bool Precise = false;
+        public bool IsNew = false;
+        public bool IsLocal = false;
+    }
+
+    public class LiveIp
+    {
+        public string Ip = "", City = "", Region = "", Country = "", Isp = "", Hostname = "";
+        public string Processes = "";
+        public int ConnCount = 0;
+        public long BytesIn = 0, BytesOut = 0;              // 本采样增量
+        public long SpeedInBps = 0, SpeedOutBps = 0;
+        public bool Precise = false;
+        public bool IsNew = false;
+        public bool IsLocal = false;
     }
 
     public class Snapshot
     {
-        public List<ConnEntry> Connections = new List<ConnEntry>();
-        public List<LiveConn> LiveConns = new List<LiveConn>();
+        public List<LiveConn> Conns = new List<LiveConn>();
         public List<LiveIp> LiveIps = new List<LiveIp>();
         public long TotalInBps = 0, TotalOutBps = 0;
         public long TodayInBytes = 0, TodayOutBytes = 0;
+        public long PeakInBps = 0, PeakOutBps = 0;
         public bool BytesPrecise = false;
         public bool IsAdmin = false;
+        public int EstablishedCount = 0;
+        public int PreciseConnCount = 0;
         public DateTime LastScan = DateTime.MinValue;
         public string LastError = "";
     }
 
     public class Monitor
     {
+        class ConnState
+        {
+            public long FirstSeenUnix = 0;
+            public long CumIn = 0, CumOut = 0;
+            public ulong LastIn = 0, LastOut = 0;
+            public bool EStatsOn = false;
+            public bool EnableTried = false;
+        }
+
         readonly AppConfig cfg;
         Thread thread;
         volatile bool stop = false;
         readonly object liveLock = new object();
+        readonly object historyLock = new object();
 
         DayData current;
         string currentDate = "";
         readonly HashSet<string> prevActiveIps = new HashSet<string>();
-        readonly Dictionary<string, ulong[]> estatsLast = new Dictionary<string, ulong[]>();
-        readonly Dictionary<string, long> connFirstSeen = new Dictionary<string, long>();
-        readonly Dictionary<string, long[]> connCumBytes = new Dictionary<string, long[]>();
+        readonly Dictionary<string, ConnState> connStates = new Dictionary<string, ConnState>();
         long lastTotalIn = 0, lastTotalOut = 0;
         bool haveLastTotal = false;
         DateTime lastSampleTime = DateTime.MinValue;
-
+        long lastPersistUnix = 0;
+        int persistCount = 0;
+        readonly Dictionary<string, DayData> historyCache = new Dictionary<string, DayData>();
         Snapshot snap = new Snapshot();
+        string lastEStatsError = "";
 
         public Monitor(AppConfig cfg)
         {
@@ -60,6 +84,8 @@ namespace NetWatcher
             current = new DayData { date = DateTime.Now.ToString("yyyy-MM-dd") };
             currentDate = current.date;
         }
+
+        public string LastEStatsError { get { lock (liveLock) return lastEStatsError; } }
 
         public void Start()
         {
@@ -73,6 +99,10 @@ namespace NetWatcher
         {
             stop = true;
             try { if (thread != null) thread.Join(3000); } catch { }
+            lock (liveLock)
+            {
+                try { Store.SaveDay(current); } catch { }
+            }
         }
 
         public static long NowUnix()
@@ -84,18 +114,20 @@ namespace NetWatcher
         {
             while (!stop)
             {
-                try
-                {
-                    int interval = cfg.ScanIntervalSeconds;
-                    Sample(interval);
-                }
+                try { Sample(); }
                 catch (Exception ex)
                 {
                     lock (liveLock) { snap.LastError = ex.Message; }
-                    try { System.IO.File.AppendAllText(System.IO.Path.Combine(cfg.EffectiveDataDir(), "monitor.log"), DateTime.Now.ToString("HH:mm:ss") + " SAMPLE ERROR: " + ex + "\r\n"); } catch { }
+                    try
+                    {
+                        System.IO.File.AppendAllText(System.IO.Path.Combine(Store.DataDir, "monitor.log"),
+                            DateTime.Now.ToString("HH:mm:ss") + " SAMPLE ERROR: " + ex + "\r\n");
+                    }
+                    catch { }
                 }
                 int slept = 0;
-                while (!stop && slept < cfg.ScanIntervalSeconds * 1000)
+                int ms = Math.Max(1, cfg.ScanIntervalSeconds) * 1000;
+                while (!stop && slept < ms)
                 {
                     Thread.Sleep(200);
                     slept += 200;
@@ -103,7 +135,8 @@ namespace NetWatcher
             }
         }
 
-        void Sample(int interval)
+        // ---------- 采样主流程 ----------
+        void Sample()
         {
             NativeMethods.ClearProcessCache();
             List<ConnEntry> conns = NativeMethods.EnumTcpConnections();
@@ -111,38 +144,26 @@ namespace NetWatcher
             DateTime now = DateTime.Now;
             long unix = NowUnix();
             string date = now.ToString("yyyy-MM-dd");
+            if (date != currentDate) RotateDay(date);
 
-            // 跨日：保存旧数据，载入/新建当日
-            if (date != currentDate)
+            // 活动连接筛选
+            List<ConnEntry> active = new List<ConnEntry>();
+            for (int i = 0; i < conns.Count; i++)
             {
-                lock (liveLock)
-                {
-                    Store.SaveDay(current);
-                    current = Store.LoadDay(date);
-                }
-                currentDate = date;
-                prevActiveIps.Clear();
-                estatsLast.Clear();
-                haveLastTotal = false;
-                lastSampleTime = DateTime.MinValue;
-            }
-
-            // 筛选：已建立连接 + 非本地远端
-            var active = new List<ConnEntry>();
-            foreach (ConnEntry c in conns)
-            {
+                ConnEntry c = conns[i];
+                if (c.State != "ESTABLISHED") continue;
                 string rip = GeoIp.NormalizeIp(c.RemoteIp);
-                if (c.State == "ESTABLISHED" && rip != "0.0.0.0" && rip != "" && !GeoIp.IsLocalIp(rip))
-                {
-                    c.RemoteIp = rip; // 归一化（v4-mapped → v4）
-                    active.Add(c);
-                }
+                if (string.IsNullOrEmpty(rip) || rip == "0.0.0.0" || rip == "::") continue;
+                if (rip == "127.0.0.1" || rip == "::1") continue;
+                if (!cfg.ShowLocalIp && GeoIp.IsLocalIp(rip)) continue;
+                c.RemoteIp = rip;
+                active.Add(c);
             }
 
-            // 总流量增量（精确）
+            // 总流量与速率
             long tin, tout;
             NativeMethods.GetTotalBytes(out tin, out tout);
-            double elapsed = interval;
+            double elapsed = cfg.ScanIntervalSeconds;
             if (lastSampleTime != DateTime.MinValue) elapsed = (now - lastSampleTime).TotalSeconds;
             if (elapsed < 1) elapsed = 1;
             lastSampleTime = now;
@@ -158,89 +179,137 @@ namespace NetWatcher
             long totalInBps = (long)(deltaIn / elapsed);
             long totalOutBps = (long)(deltaOut / elapsed);
 
-            // 按 IP 分组（先做 GeoIP，可能较慢，放在锁外）
-            var byIp = new Dictionary<string, List<ConnEntry>>();
-            foreach (ConnEntry c in active)
-            {
-                if (!byIp.ContainsKey(c.RemoteIp)) byIp[c.RemoteIp] = new List<ConnEntry>();
-                byIp[c.RemoteIp].Add(c);
-            }
-
-            var geoMap = new Dictionary<string, GeoInfo>();
-            foreach (string ip in byIp.Keys)
-            {
-                geoMap[ip] = GeoIp.Lookup(ip);
-            }
-
-            // 逐连接 / 逐 IP / 逐进程字节
             bool isAdmin = NativeMethods.IsAdministrator();
-            bool precise = false;
-            var connDelta = new Dictionary<string, long[]>(); // ConnKey -> [in, out]
-            var perIpBytes = new Dictionary<string, long[]>(); // ip -> [in, out]
-            foreach (string ip in byIp.Keys) perIpBytes[ip] = new long[2];
-            var procIpBytes = new Dictionary<string, long[]>(); // procKey|ip -> [in, out]
+
+            // 逐连接差分（精确模式）或均分估算
+            Dictionary<string, long[]> connDelta = new Dictionary<string, long[]>(); // [in, out]
+            int preciseCount = 0;
+
+            // 每条活动连接都建状态（记录首见时间、累计字节），IPv6 连接也建
+            HashSet<string> curKeys = new HashSet<string>();
+            for (int i = 0; i < active.Count; i++)
+            {
+                string key = ConnKey(active[i]);
+                curKeys.Add(key);
+                if (!connStates.ContainsKey(key))
+                {
+                    ConnState nst = new ConnState();
+                    nst.FirstSeenUnix = unix;
+                    connStates[key] = nst;
+                }
+            }
 
             if (isAdmin)
             {
-                precise = true;
-                var curKeys = new HashSet<string>();
-                foreach (ConnEntry c in active)
+                for (int i = 0; i < active.Count; i++)
                 {
+                    ConnEntry c = active[i];
                     if (c.Proto != "TCP") continue;
-                    string key = c.Pid + "|" + c.LocalAddrRaw + "|" + c.LocalPortRaw + "|" + c.RemoteAddrRaw + "|" + c.RemotePortRaw;
-                    curKeys.Add(key);
-                    ulong bo, bi;
-                    if (NativeMethods.ReadTcpDataBytes(c, out bo, out bi))
+                    string key = ConnKey(c);
+                    ConnState st = connStates[key];
+                    if (!st.EStatsOn)
                     {
-                        long dOut = 0, dIn = 0;
-                        if (estatsLast.ContainsKey(key))
+                        uint erc; int eerr;
+                        if (NativeMethods.EStatsEnable(c, out erc, out eerr))
                         {
-                            ulong lastOut = estatsLast[key][0], lastIn = estatsLast[key][1];
-                            if (bo >= lastOut) dOut = (long)(bo - lastOut);
-                            if (bi >= lastIn) dIn = (long)(bi - lastIn);
+                            st.EStatsOn = true;
                         }
-                        estatsLast[key] = new ulong[] { bo, bi };
-                        string ck = ConnKey(c);
-                        if (!connDelta.ContainsKey(ck)) connDelta[ck] = new long[2];
-                        connDelta[ck][0] += dIn;
-                        connDelta[ck][1] += dOut;
+                        else
+                        {
+                            lastEStatsError = "EStatsEnable 失败 rc=" + erc + " winerr=" + eerr
+                                + " | " + (NativeMethods.EStatsDiag.Length > 300 ? NativeMethods.EStatsDiag.Substring(0, 300) : NativeMethods.EStatsDiag);
+                        }
                     }
-                }
-                var gone = new List<string>();
-                foreach (string k in estatsLast.Keys) if (!curKeys.Contains(k)) gone.Add(k);
-                foreach (string k in gone) estatsLast.Remove(k);
-            }
-            else
-            {
-                int totalConns = active.Count;
-                if (totalConns > 0)
-                {
-                    long sIn = deltaIn / totalConns;
-                    long sOut = deltaOut / totalConns;
-                    foreach (ConnEntry c in active)
+                    ulong o, ii; uint rc = 0; int werr = 0;
+                    if (st.EStatsOn && NativeMethods.EStatsRead(c, out o, out ii, out rc, out werr))
                     {
-                        string ck = ConnKey(c);
-                        if (!connDelta.ContainsKey(ck)) connDelta[ck] = new long[2];
-                        connDelta[ck][0] += sIn;
-                        connDelta[ck][1] += sOut;
+                        long dIn = 0, dOut = 0;
+                        if (st.LastIn > 0 || st.LastOut > 0)
+                        {
+                            if (ii >= st.LastIn) dIn = (long)(ii - st.LastIn);
+                            if (o >= st.LastOut) dOut = (long)(o - st.LastOut);
+                        }
+                        st.LastIn = ii; st.LastOut = o;
+                        st.CumIn += dIn; st.CumOut += dOut;
+                        connDelta[key] = new long[] { dIn, dOut };
+                        preciseCount++;
+                    }
+                    else if (st.EStatsOn)
+                    {
+                        lastEStatsError = "EStatsRead 失败 rc=" + rc + " winerr=" + werr;
                     }
                 }
             }
 
-            // 由逐连接增量汇总出逐 IP / 逐进程
-            foreach (ConnEntry c in active)
+            bool precise = preciseCount > 0;
+
+            // 非精确时：按活动连接数均分总流量（明确标注"估算"；余数给最后一条，保证合计不丢字节）
+            if (!precise && active.Count > 0)
             {
-                string ck = ConnKey(c);
-                long[] cd = connDelta.ContainsKey(ck) ? connDelta[ck] : new long[2];
-                perIpBytes[c.RemoteIp][0] += cd[0];
-                perIpBytes[c.RemoteIp][1] += cd[1];
-                string pk = ProcKey(c) + "|" + c.RemoteIp;
-                if (!procIpBytes.ContainsKey(pk)) procIpBytes[pk] = new long[2];
-                procIpBytes[pk][0] += cd[0];
-                procIpBytes[pk][1] += cd[1];
+                long sIn = deltaIn / active.Count;
+                long sOut = deltaOut / active.Count;
+                long remIn = deltaIn, remOut = deltaOut;
+                for (int i = 0; i < active.Count; i++)
+                {
+                    ConnEntry c = active[i];
+                    long aIn = sIn, aOut = sOut;
+                    if (i == active.Count - 1) { aIn = remIn; aOut = remOut; }
+                    remIn -= aIn; remOut -= aOut;
+                    string key = ConnKey(c);
+                    connDelta[key] = new long[] { aIn, aOut };
+                    ConnState st;
+                    if (!connStates.TryGetValue(key, out st))
+                    {
+                        st = new ConnState();
+                        st.FirstSeenUnix = unix;
+                        connStates[key] = st;
+                    }
+                    st.CumIn += aIn; st.CumOut += aOut;
+                }
             }
 
-            // 更新内存数据 + 实时快照（加锁）
+            // 清理已消失连接的累计状态（每个采样周期一次）
+            List<string> goneKeys = new List<string>();
+            foreach (string k in connStates.Keys) if (!curKeys.Contains(k)) goneKeys.Add(k);
+            for (int i = 0; i < goneKeys.Count; i++) connStates.Remove(goneKeys[i]);
+
+            // 按 IP / 进程汇总增量
+            Dictionary<string, List<ConnEntry>> byIp = new Dictionary<string, List<ConnEntry>>();
+            for (int i = 0; i < active.Count; i++)
+            {
+                ConnEntry c = active[i];
+                List<ConnEntry> l;
+                if (!byIp.TryGetValue(c.RemoteIp, out l)) { l = new List<ConnEntry>(); byIp[c.RemoteIp] = l; }
+                l.Add(c);
+            }
+            Dictionary<string, long[]> perIpBytes = new Dictionary<string, long[]>();
+            foreach (string ip in byIp.Keys) perIpBytes[ip] = new long[2];
+            Dictionary<string, long[]> procIpBytes = new Dictionary<string, long[]>();
+            Dictionary<string, long[]> procBytes = new Dictionary<string, long[]>();
+            Dictionary<string, HashSet<string>> procConnKeys = new Dictionary<string, HashSet<string>>();
+
+            for (int i = 0; i < active.Count; i++)
+            {
+                ConnEntry c = active[i];
+                string key = ConnKey(c);
+                long[] d = connDelta.ContainsKey(key) ? connDelta[key] : new long[2];
+                perIpBytes[c.RemoteIp][0] += d[0];
+                perIpBytes[c.RemoteIp][1] += d[1];
+                string pk = ProcKey(c);
+                if (!procBytes.ContainsKey(pk)) procBytes[pk] = new long[2];
+                procBytes[pk][0] += d[0]; procBytes[pk][1] += d[1];
+                string ipk = pk + "|" + c.RemoteIp;
+                if (!procIpBytes.ContainsKey(ipk)) procIpBytes[ipk] = new long[2];
+                procIpBytes[ipk][0] += d[0]; procIpBytes[ipk][1] += d[1];
+                if (!procConnKeys.ContainsKey(pk)) procConnKeys[pk] = new HashSet<string>();
+                procConnKeys[pk].Add(key);
+            }
+
+            // GeoIP（缓存命中即可，未命中入队后台解析）
+            Dictionary<string, GeoInfo> geoMap = new Dictionary<string, GeoInfo>();
+            foreach (string ip in byIp.Keys) geoMap[ip] = GeoIp.Lookup(ip);
+
+            DayData toSave = null;
             lock (liveLock)
             {
                 if (current.firstSampleUnix == 0) current.firstSampleUnix = unix;
@@ -251,168 +320,235 @@ namespace NetWatcher
                 if (totalInBps > current.peakInBps) current.peakInBps = totalInBps;
                 if (totalOutBps > current.peakOutBps) current.peakOutBps = totalOutBps;
                 if (precise) current.bytesPrecise = true;
-                current.samples.Add(new long[] { unix, deltaIn, deltaOut });
 
-                var newActive = new HashSet<string>();
-                foreach (var kv in byIp)
+                // 分钟桶（最多 1440 条 = 24 小时）
+                long minute = unix - (unix % 60);
+                if (current.samples.Count == 0 || current.samples[current.samples.Count - 1][0] != minute)
+                    current.samples.Add(new long[] { minute, deltaIn, deltaOut });
+                else
+                {
+                    long[] lastb = current.samples[current.samples.Count - 1];
+                    lastb[1] += deltaIn; lastb[2] += deltaOut;
+                }
+                while (current.samples.Count > 1440) current.samples.RemoveAt(0);
+
+                // 逐 IP 聚合
+                HashSet<string> newActive = new HashSet<string>();
+                foreach (KeyValuePair<string, List<ConnEntry>> kv in byIp)
                 {
                     string ip = kv.Key;
-                    var list = kv.Value;
+                    List<ConnEntry> list = kv.Value;
                     newActive.Add(ip);
+
                     IpAggregate a;
-                    if (!current.ips.ContainsKey(ip))
-                    {
-                        a = new IpAggregate { ip = ip };
-                        current.ips[ip] = a;
-                    }
-                    else a = current.ips[ip];
+                    if (!current.ips.TryGetValue(ip, out a)) { a = new IpAggregate(); a.ip = ip; current.ips[ip] = a; }
 
                     a.sampleCount++;
                     a.connectedSeconds += (long)Math.Round(elapsed);
-                    if (a.firstSeenUnix == 0) a.firstSeenUnix = unix;
-                    a.lastSeenUnix = unix;
-                    if (!prevActiveIps.Contains(ip)) a.sessionCount++;
-
-                    long[] b = perIpBytes.ContainsKey(ip) ? perIpBytes[ip] : new long[2];
-                    a.bytesIn += b[0];
-                    a.bytesOut += b[1];
-                    long ipInBps = (long)(b[0] / elapsed);
-                    long ipOutBps = (long)(b[1] / elapsed);
-                    if (ipInBps > a.peakInBps) a.peakInBps = ipInBps;
-                    if (ipOutBps > a.peakOutBps) a.peakOutBps = ipOutBps;
-                    a.bytesPrecise = precise;
-
-                    GeoInfo g = geoMap.ContainsKey(ip) ? geoMap[ip] : null;
-                    if (g != null && (g.Country != "" || g.City != ""))
+                    if (a.firstSeenUnix == 0)
                     {
-                        a.city = g.City; a.region = g.Region; a.country = g.Country; a.isp = g.Isp;
+                        a.firstSeenUnix = unix;
+                        a.isNew = true;
+                    }
+                    a.lastSeenUnix = unix;
+                    if (!prevActiveIps.Contains(ip))
+                    {
+                        a.sessionCount++;
+                        a.isNew = true;
                     }
 
-                    var seenProc = new HashSet<string>();
-                    foreach (ConnEntry c in list)
+                    long[] b = perIpBytes[ip];
+                    a.bytesIn += b[0];
+                    a.bytesOut += b[1];
+                    if (elapsed > 0)
                     {
-                        string pn = c.ProcessName != "" ? c.ProcessName : "(未知)";
-                        if (!seenProc.Contains(pn)) { seenProc.Add(pn); IncInt(a.processes, pn); }
-                        IncInt(a.states, c.State);
+                        long ipInBps = (long)(b[0] / elapsed);
+                        long ipOutBps = (long)(b[1] / elapsed);
+                        if (ipInBps > a.peakInBps) a.peakInBps = ipInBps;
+                        if (ipOutBps > a.peakOutBps) a.peakOutBps = ipOutBps;
+                    }
+                    if (precise) a.bytesPrecise = true;
+
+                    GeoInfo g;
+                    if (geoMap.TryGetValue(ip, out g) && g != null && (g.Country.Length > 0 || g.City.Length > 0))
+                    {
+                        a.city = g.City; a.region = g.Region; a.country = NormalizeCn(g.Country); a.isp = g.Isp;
+                        if (!string.IsNullOrEmpty(g.Host)) a.hostname = g.Host;
+                    }
+
+                    for (int j = 0; j < list.Count; j++)
+                    {
+                        ConnEntry c = list[j];
+                        string pn = string.IsNullOrEmpty(c.ProcessName) ? "(未知)" : c.ProcessName;
+                        if (!a.processes.ContainsKey(pn)) a.processes[pn] = 0;
+                        a.processes[pn]++;
+                        if (!a.states.ContainsKey(c.State)) a.states[c.State] = 0;
+                        a.states[c.State]++;
                         if (!a.ports.Contains(c.RemotePort)) a.ports.Add(c.RemotePort);
                     }
                 }
                 prevActiveIps.Clear();
                 foreach (string ip in newActive) prevActiveIps.Add(ip);
 
-                // 进程级聚合（进程名|PID -> 各远端IP）
-                var byProcIp = new Dictionary<string, List<ConnEntry>>();
-                foreach (ConnEntry c in active)
+                // 逐进程聚合
+                foreach (KeyValuePair<string, List<ConnEntry>> kv in byIp)
                 {
-                    string k = ProcKey(c) + "|" + c.RemoteIp;
-                    if (!byProcIp.ContainsKey(k)) byProcIp[k] = new List<ConnEntry>();
-                    byProcIp[k].Add(c);
+                    for (int j = 0; j < kv.Value.Count; j++)
+                    {
+                        ConnEntry c = kv.Value[j];
+                        string pk = ProcKey(c);
+                        ProcAgg pa;
+                        if (!current.procs.TryGetValue(pk, out pa))
+                        {
+                            pa = new ProcAgg();
+                            pa.name = string.IsNullOrEmpty(c.ProcessName) ? "(未知)" : c.ProcessName;
+                            pa.path = c.ProcessPath;
+                            pa.pid = c.Pid;
+                            pa.processStartUnix = c.ProcessStartUnix;
+                            current.procs[pk] = pa;
+                        }
+                        if (pa.firstSeenUnix == 0) pa.firstSeenUnix = unix;
+                        pa.lastSeenUnix = unix;
+
+                        IpConnAgg ia;
+                        if (!pa.ips.TryGetValue(c.RemoteIp, out ia))
+                        {
+                            ia = new IpConnAgg();
+                            ia.ip = c.RemoteIp;
+                            ia.proto = c.Proto;
+                            ia.firstSeenUnix = unix;
+                            pa.ips[c.RemoteIp] = ia;
+                        }
+                        GeoInfo g;
+                        if (geoMap.TryGetValue(c.RemoteIp, out g) && g != null)
+                        {
+                            ia.city = g.City; ia.region = g.Region; ia.country = NormalizeCn(g.Country);
+                            ia.isp = g.Isp; ia.hostname = g.Host;
+                        }
+                        if (!ia.ports.Contains(c.RemotePort)) ia.ports.Add(c.RemotePort);
+
+                        // 连接次数：同一连接只计一次（用 connStates 的首见时间判断）
+                        ConnState cs;
+                        if (connStates.TryGetValue(ConnKey(c), out cs) && cs.FirstSeenUnix == unix)
+                        {
+                            ia.connCount++;
+                            pa.connCount++;
+                        }
+                    }
                 }
-                foreach (var kv in byProcIp)
+                foreach (KeyValuePair<string, long[]> kv in procBytes)
                 {
-                    List<ConnEntry> clist = kv.Value;
-                    ConnEntry c0 = clist[0];
-                    string pk = ProcKey(c0);
                     ProcAgg pa;
-                    if (!current.procs.ContainsKey(pk))
+                    if (current.procs.TryGetValue(kv.Key, out pa))
                     {
-                        pa = new ProcAgg { name = string.IsNullOrEmpty(c0.ProcessName) ? "(未知)" : c0.ProcessName, pid = c0.Pid };
-                        current.procs[pk] = pa;
+                        pa.bytesIn += kv.Value[0];
+                        pa.bytesOut += kv.Value[1];
                     }
-                    else pa = current.procs[pk];
-                    if (pa.firstSeenUnix == 0) pa.firstSeenUnix = unix;
-                    pa.lastSeenUnix = unix;
-                    pa.connCount += clist.Count;
-
+                }
+                foreach (KeyValuePair<string, long[]> kv in procIpBytes)
+                {
+                    int bar = kv.Key.LastIndexOf('|');
+                    if (bar <= 0) continue;
+                    string pk = kv.Key.Substring(0, bar);
+                    string ip = kv.Key.Substring(bar + 1);
+                    ProcAgg pa;
+                    if (!current.procs.TryGetValue(pk, out pa)) continue;
                     IpConnAgg ia;
-                    if (!pa.ips.ContainsKey(c0.RemoteIp))
-                    {
-                        ia = new IpConnAgg { ip = c0.RemoteIp, proto = c0.Proto };
-                        pa.ips[c0.RemoteIp] = ia;
-                    }
-                    else ia = pa.ips[c0.RemoteIp];
-                    ia.connCount += clist.Count;
-                    foreach (ConnEntry cc in clist)
-                    {
-                        if (!ia.ports.Contains(cc.RemotePort)) ia.ports.Add(cc.RemotePort);
-                    }
-                    GeoInfo g2 = geoMap.ContainsKey(c0.RemoteIp) ? geoMap[c0.RemoteIp] : null;
-                    if (g2 != null && (g2.Country != "" || g2.City != ""))
-                    {
-                        ia.city = g2.City; ia.region = g2.Region; ia.country = g2.Country; ia.isp = g2.Isp;
-                    }
-                    long[] pb = procIpBytes.ContainsKey(kv.Key) ? procIpBytes[kv.Key] : new long[2];
-                    ia.bytesIn += pb[0];
-                    ia.bytesOut += pb[1];
-                    pa.bytesIn += pb[0];
-                    pa.bytesOut += pb[1];
+                    if (!pa.ips.TryGetValue(ip, out ia)) continue;
+                    ia.bytesIn += kv.Value[0];
+                    ia.bytesOut += kv.Value[1];
                 }
 
-                // 构建快照
-                var s = new Snapshot();
+                // 快照
+                Snapshot s = new Snapshot();
                 s.IsAdmin = isAdmin;
-                s.BytesPrecise = precise;
+                s.BytesPrecise = precise || current.bytesPrecise;
                 s.TotalInBps = totalInBps;
                 s.TotalOutBps = totalOutBps;
                 s.TodayInBytes = current.bytesIn;
                 s.TodayOutBytes = current.bytesOut;
+                s.PeakInBps = current.peakInBps;
+                s.PeakOutBps = current.peakOutBps;
                 s.LastScan = now;
-                foreach (ConnEntry c in active) s.Connections.Add(c);
+                s.EstablishedCount = active.Count;
+                s.PreciseConnCount = preciseCount;
+                s.LastError = lastEStatsError;
 
-                // 逐连接实时信息（累计字节 + 时长）
-                var curConnKeys = new HashSet<string>();
-                foreach (ConnEntry c in active)
+                for (int i = 0; i < active.Count; i++)
                 {
-                    string ck = ConnKey(c);
-                    curConnKeys.Add(ck);
-                    long[] cd = connDelta.ContainsKey(ck) ? connDelta[ck] : new long[2];
-                    if (!connFirstSeen.ContainsKey(ck)) connFirstSeen[ck] = unix;
-                    if (!connCumBytes.ContainsKey(ck)) connCumBytes[ck] = new long[2];
-                    connCumBytes[ck][0] += cd[0];
-                    connCumBytes[ck][1] += cd[1];
+                    ConnEntry c = active[i];
+                    string key = ConnKey(c);
+                    ConnState st;
+                    connStates.TryGetValue(key, out st);
+                    long[] d = connDelta.ContainsKey(key) ? connDelta[key] : new long[2];
 
-                    var lc = new LiveConn();
+                    LiveConn lc = new LiveConn();
                     lc.Ip = c.RemoteIp;
                     lc.RemotePort = c.RemotePort;
                     lc.LocalPort = c.LocalPort;
                     lc.Pid = c.Pid;
                     lc.ProcessName = c.ProcessName;
+                    lc.ProcessPath = c.ProcessPath;
                     lc.State = c.State;
                     lc.Proto = c.Proto;
-                    lc.BytesIn = connCumBytes[ck][0];
-                    lc.BytesOut = connCumBytes[ck][1];
-                    lc.DurationSeconds = unix - connFirstSeen[ck];
-                    lc.SpeedInBps = (long)(cd[0] / elapsed);
-                    lc.SpeedOutBps = (long)(cd[1] / elapsed);
-                    GeoInfo gc = geoMap.ContainsKey(c.RemoteIp) ? geoMap[c.RemoteIp] : null;
-                    if (gc != null)
+                    lc.BytesIn = st != null ? st.CumIn : 0;
+                    lc.BytesOut = st != null ? st.CumOut : 0;
+                    lc.FirstSeenUnix = st != null ? st.FirstSeenUnix : unix;
+                    lc.DurationSeconds = unix - lc.FirstSeenUnix;
+                    lc.SpeedInBps = (long)(d[0] / elapsed);
+                    lc.SpeedOutBps = (long)(d[1] / elapsed);
+                    lc.Precise = precise && (st != null && st.EStatsOn);
+                    lc.IsLocal = GeoIp.IsLocalIp(c.RemoteIp);
+                    GeoInfo g;
+                    if (geoMap.TryGetValue(c.RemoteIp, out g) && g != null)
                     {
-                        lc.City = gc.City; lc.Region = gc.Region; lc.Country = gc.Country; lc.Isp = gc.Isp;
+                        lc.City = g.City; lc.Region = g.Region; lc.Country = NormalizeCn(g.Country);
+                        lc.Isp = g.Isp; lc.Hostname = g.Host;
                     }
-                    s.LiveConns.Add(lc);
+                    IpAggregate ia2;
+                    if (current.ips.TryGetValue(c.RemoteIp, out ia2)) lc.IsNew = ia2.isNew;
+                    s.Conns.Add(lc);
                 }
-                // 清理已消失连接的累计/首见
-                var goneConns = new List<string>();
-                foreach (string k in connFirstSeen.Keys) if (!curConnKeys.Contains(k)) goneConns.Add(k);
-                foreach (string k in goneConns) { connFirstSeen.Remove(k); connCumBytes.Remove(k); }
-                s.LiveConns.Sort(delegate(LiveConn x, LiveConn y) { return (y.BytesIn + y.BytesOut).CompareTo(x.BytesIn + x.BytesOut); });
+                s.Conns.Sort(delegate(LiveConn x, LiveConn y) { return (y.BytesIn + y.BytesOut).CompareTo(x.BytesIn + x.BytesOut); });
 
-                foreach (var kv in byIp)
+                foreach (KeyValuePair<string, List<ConnEntry>> kv in byIp)
                 {
                     string ip = kv.Key;
-                    long[] b = perIpBytes.ContainsKey(ip) ? perIpBytes[ip] : new long[2];
-                    GeoInfo g = geoMap.ContainsKey(ip) ? geoMap[ip] : null;
-                    var li = new LiveIp();
+                    LiveIp li = new LiveIp();
                     li.Ip = ip;
                     li.ConnCount = kv.Value.Count;
-                    li.BytesInDelta = b[0];
-                    li.BytesOutDelta = b[1];
+                    long[] b = perIpBytes[ip];
+                    li.BytesIn = b[0]; li.BytesOut = b[1];
                     li.SpeedInBps = (long)(b[0] / elapsed);
                     li.SpeedOutBps = (long)(b[1] / elapsed);
-                    if (g != null)
+                    li.IsLocal = GeoIp.IsLocalIp(ip);
+                    li.Precise = precise;
+                    GeoInfo g;
+                    if (geoMap.TryGetValue(ip, out g) && g != null)
                     {
-                        li.City = g.City; li.Region = g.Region; li.Country = g.Country; li.Isp = g.Isp;
+                        li.City = g.City; li.Region = g.Region; li.Country = NormalizeCn(g.Country);
+                        li.Isp = g.Isp; li.Hostname = g.Host;
                     }
+                    IpAggregate a2;
+                    if (current.ips.TryGetValue(ip, out a2)) li.IsNew = a2.isNew;
+                    // 进程名列表（按连接数取前 4）
+                    Dictionary<string, int> pn = new Dictionary<string, int>();
+                    for (int j = 0; j < kv.Value.Count; j++)
+                    {
+                        string nm = string.IsNullOrEmpty(kv.Value[j].ProcessName) ? "(未知)" : kv.Value[j].ProcessName;
+                        if (!pn.ContainsKey(nm)) pn[nm] = 0;
+                        pn[nm]++;
+                    }
+                    List<KeyValuePair<string, int>> pl = new List<KeyValuePair<string, int>>(pn);
+                    pl.Sort(delegate(KeyValuePair<string, int> x, KeyValuePair<string, int> y) { return y.Value.CompareTo(x.Value); });
+                    StringBuilder psb = new StringBuilder();
+                    for (int j = 0; j < pl.Count && j < 4; j++)
+                    {
+                        if (psb.Length > 0) psb.Append(", ");
+                        psb.Append(pl[j].Key);
+                    }
+                    if (pl.Count > 4) psb.Append(" ...");
+                    li.Processes = psb.ToString();
                     s.LiveIps.Add(li);
                 }
                 s.LiveIps.Sort(delegate(LiveIp x, LiveIp y)
@@ -421,21 +557,49 @@ namespace NetWatcher
                 });
                 snap = s;
 
-                Store.SaveDay(current);
+                // 落盘节流：至少 15 秒一次
+                if (unix - lastPersistUnix >= 15)
+                {
+                    lastPersistUnix = unix;
+                    persistCount++;
+                    toSave = current.Clone();
+                }
             }
 
-            Store.EnforceRetention(cfg.RetentionDays);
+            if (toSave != null)
+            {
+                Store.SaveDay(toSave);
+                if (persistCount % 20 == 0) Store.EnforceRetention(cfg.RetentionDays);
+            }
         }
 
-        static void IncInt(Dictionary<string, int> d, string k)
+        static readonly Dictionary<string, string> CnFix = new Dictionary<string, string>
         {
-            if (!d.ContainsKey(k)) d[k] = 0;
-            d[k]++;
+            { "中華人民共和國", "中国" },
+            { "中國", "中国" },
+            { "美國", "美国" },
+            { "日本", "日本" },
+            { "韓國", "韩国" },
+            { "俄羅斯", "俄罗斯" },
+            { "英國", "英国" },
+            { "法國", "法国" },
+            { "德國", "德国" },
+            { "澳洲", "澳大利亚" },
+            { "澳大利亞", "澳大利亚" },
+        };
+
+        static string NormalizeCn(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            string v;
+            if (CnFix.TryGetValue(s, out v)) return v;
+            return s;
         }
 
         static string ProcKey(ConnEntry c)
         {
-            return (string.IsNullOrEmpty(c.ProcessName) ? "(未知)" : c.ProcessName) + "|" + c.Pid;
+            string n = string.IsNullOrEmpty(c.ProcessName) ? "(未知)" : c.ProcessName;
+            return n + "|" + c.Pid + "|" + c.ProcessStartUnix;
         }
 
         static string ConnKey(ConnEntry c)
@@ -443,50 +607,106 @@ namespace NetWatcher
             return c.Pid + "|" + c.RemoteIp + "|" + c.RemotePort + "|" + c.LocalPort + "|" + c.Proto;
         }
 
-        // ---------- 供 UI 读取（线程安全） ----------
+        void RotateDay(string date)
+        {
+            lock (liveLock)
+            {
+                try { Store.SaveDay(current); } catch { }
+                current = Store.LoadDay(date);
+                currentDate = date;
+                prevActiveIps.Clear();
+                connStates.Clear();
+                haveLastTotal = false;
+                lastSampleTime = DateTime.MinValue;
+                lastPersistUnix = 0;
+                lock (historyLock) historyCache.Clear();
+            }
+        }
+
+        // ---------- 查询接口（线程安全，返回副本） ----------
+
         public Snapshot GetSnapshot()
         {
             lock (liveLock) return snap;
         }
 
-        public List<IpAggregate> GetTodayAggregates()
+        public DayData GetDay(string date)
         {
             lock (liveLock)
             {
-                var r = new List<IpAggregate>();
-                foreach (var kv in current.ips) r.Add(kv.Value);
-                r.Sort(delegate(IpAggregate x, IpAggregate y) { return (y.bytesIn + y.bytesOut).CompareTo(x.bytesIn + x.bytesOut); });
-                return r;
+                if (date == currentDate) return current.Clone();
+                return Store.LoadDay(date);
             }
         }
 
-        public List<ProcAgg> GetTodayProcs()
+        public DayData TodaySnapshot()
         {
-            lock (liveLock)
-            {
-                var r = new List<ProcAgg>();
-                foreach (var kv in current.procs) r.Add(kv.Value);
-                r.Sort(delegate(ProcAgg x, ProcAgg y) { return (y.bytesIn + y.bytesOut).CompareTo(x.bytesIn + x.bytesOut); });
-                return r;
-            }
+            lock (liveLock) return current.Clone();
         }
 
-        public DayData GetTodaySummary()
+        public List<IpAggregate> GetDayIps(string date)
         {
+            DayData d;
             lock (liveLock)
             {
-                var c = new DayData();
-                c.date = current.date;
-                c.bytesIn = current.bytesIn;
-                c.bytesOut = current.bytesOut;
-                c.peakInBps = current.peakInBps;
-                c.peakOutBps = current.peakOutBps;
-                c.firstSampleUnix = current.firstSampleUnix;
-                c.lastSampleUnix = current.lastSampleUnix;
-                c.sampleCount = current.sampleCount;
-                c.bytesPrecise = current.bytesPrecise;
-                return c;
+                if (date == currentDate) d = current.Clone();
+                else d = null;
             }
+            if (d == null) d = Store.LoadDay(date);
+            List<IpAggregate> list = new List<IpAggregate>(d.ips.Values);
+            list.Sort(delegate(IpAggregate x, IpAggregate y) { return (y.bytesIn + y.bytesOut).CompareTo(x.bytesIn + x.bytesOut); });
+            return list;
+        }
+
+        public List<ProcAgg> GetDayProcs(string date)
+        {
+            DayData d;
+            lock (liveLock)
+            {
+                if (date == currentDate) d = current.Clone();
+                else d = null;
+            }
+            if (d == null) d = Store.LoadDay(date);
+            List<ProcAgg> list = new List<ProcAgg>(d.procs.Values);
+            list.Sort(delegate(ProcAgg x, ProcAgg y) { return (y.bytesIn + y.bytesOut).CompareTo(x.bytesIn + x.bytesOut); });
+            return list;
+        }
+
+        public List<DayData> GetHistory()
+        {
+            List<DayData> result = new List<DayData>();
+            string today;
+            lock (liveLock) today = currentDate;
+            List<string> dates = Store.ListDates();
+            lock (historyLock)
+            {
+                List<string> keep = new List<string>();
+                foreach (string dt in dates)
+                {
+                    keep.Add(dt);
+                    DayData cached;
+                    if (!historyCache.TryGetValue(dt, out cached))
+                    {
+                        DayData full = Store.LoadDay(dt);
+                        cached = full.SummaryOnly();
+                        historyCache[dt] = cached;
+                    }
+                    result.Add(cached);
+                }
+                List<string> stale = new List<string>();
+                foreach (string k in historyCache.Keys) if (!keep.Contains(k)) stale.Add(k);
+                for (int i = 0; i < stale.Count; i++) historyCache.Remove(stale[i]);
+            }
+            // 今天如果还没落盘，用内存汇总补上
+            if (!dates.Contains(today))
+            {
+                lock (liveLock) result.Insert(0, current.SummaryOnly());
+            }
+            else
+            {
+                lock (liveLock) result[0] = current.SummaryOnly();
+            }
+            return result;
         }
     }
 }

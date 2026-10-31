@@ -8,3 +8,6 @@ testdata/
 obj/
 bin/autostart-error.log
 bin/monitor.log
+
+# QA 运行产物（截图/控件树/报告）
+tools/qa/out/
