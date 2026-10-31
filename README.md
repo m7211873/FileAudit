@@ -258,6 +258,12 @@ build.bat
   SignPath Foundation（免费）或 Certum 开源名额。
 - **注意**：如果安全软件提示来自**火绒 / 360 等第三方 HIPS**（不是 Windows SmartScreen），
   签名不一定会让它放行，需要在对应安全软件里把程序加入"信任区"。
+- **双击时弹出「Windows 已保护你的电脑」怎么办**：这是 Windows SmartScreen（Defender）在检查
+  "网络来源标记 + 发布者信誉"。若程序是从网页/聊天软件下载的副本，右键 exe → 属性 → 勾选
+  "解除锁定"，或运行 `tools\fix-smartscreen.ps1`（会自动检查并解除下载标记，同时打印签名与
+  SmartScreen 设置）。安装脚本 `install.ps1` 也会自动解除下载标记。
+  本机自编译并签名的 `bin\NetWatcher.exe` 不带下载标记，正常不会被拦。
+
 
 ## 十、项目结构
 

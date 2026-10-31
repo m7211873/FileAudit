@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 #  IP监控2.0（NetWatcher）安装脚本
 #  纯系统自带组件（PowerShell + WScript.Shell），无需管理员权限。
 #
@@ -117,6 +117,16 @@ if (-not (Test-Path -LiteralPath $Exe)) {
     exit 1
 }
 Write-Ok ("程序: {0}" -f $Exe)
+
+# 如果 exe 是从网页/聊天软件下载来的，会带 Mark-of-the-Web（下载标记），
+# 双击时 Windows SmartScreen 可能弹「Windows 已保护你的电脑」。这里顺手解除锁定。
+try {
+    $zone = Get-Content -LiteralPath $Exe -Stream Zone.Identifier -ErrorAction Stop
+    if ($zone) {
+        Unblock-File -LiteralPath $Exe -ErrorAction Stop
+        Write-Ok '已解除程序的"下载"标记（避免 SmartScreen 拦截）'
+    }
+} catch { }
 
 # ---- 1) 数据目录 ----
 if ([string]::IsNullOrWhiteSpace($DataDir)) {
