@@ -180,3 +180,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\regression-activati
 - D1：GUI 占 datadir 时 `--daemon` 退出码 = 2；
 - E1：清理检查。
 - 2026-10-31 基线：`RESULT: PASS  PASS=9 FAIL=0 WARN=0`。
+
+## 2.1.1 托盘修复回归（`regression-quit.ps1`）
+
+用于锁定 `--quit` 优雅退出与托盘生命周期修复（2026-10-31 新增）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\regression-quit.ps1
+```
+
+- Q1 启动隐藏；Q2 `--quit` 后主实例 10s 内退出；Q3 `startup.log` 有 `Application.Run 退出`；
+  Q4 数据已落盘且 JSON 可解析；Q5 无 ui-error/crash；Q6 进程清理。
+- 2026-10-31 基线：`RESULT: PASS  PASS=6 FAIL=0`。
+- 同时 `regression-p1.ps1` 的 R9 版本断言改为接受 `2.1.x.0`（2.1.1 起版本号会变）。

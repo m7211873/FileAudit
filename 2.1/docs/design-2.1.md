@@ -34,7 +34,7 @@
 | 单实例互斥量 | `NetWatcher2.1_SingleInstance_Mutex`（`--mutex-tag X` → `…_X`） |
 | 唤出事件 | `NetWatcher2.1_SingleInstance_Mutex_Activate`（`--mutex-tag X` → `…_X`） |
 | 数据写锁 | `NetWatcher2.1_DataLock_<MD5(数据目录绝对路径小写)>`（`--mutex-tag` 不影响） |
-| 程序集版本 | `AssemblyVersion` / `AssemblyFileVersion` = `2.1.0.0` |
+| 程序集版本 | `AssemblyVersion` / `AssemblyFileVersion` = `2.1.1.0` |
 | 产品/标题文案 | `IP监控2.1 (NetWatcher)` / `IP监控2.1 · 网络连接监控 (NetWatcher)` / `设置 · IP监控2.1` |
 | 仓库位置 | Gitee 根目录下的 `2.1/` 子文件夹（与 2.0 并列；根目录 2.0 文件一律不改） |
 
@@ -190,6 +190,14 @@ Main(args)
  └─ finally: monitor.Stop()；释放写锁
 ```
 
+## 5.4 托盘图标生命周期（2.1.1 修复）
+
+- 原则：**同一时刻只有一个 `NotifyIcon`**；只允许两种"重加"场景：启动后 3 秒补偿一次、`TaskbarCreated` 重建一次。
+- 禁止用 `Visible=false; Visible=true` 反复重加（会在通知区域产生重复/幽灵图标）；
+  `EnsureTray()` 仅在 `tray==null` 时 `BuildTray()`，仅在 `!Visible` 时补一次；
+  `ExitApp()` 必须先停 `trayRetryTimer` 再 `Dispose` 图标。
+- `--quit/--exit`：第二实例通过命名事件通知主实例 `ExitApp()`，用于脚本优雅停止。
+
 ## 6. 配置（src/Config.cs）
 
 字段（JSON 键名保持，兼容旧 config.json）：
@@ -246,7 +254,7 @@ P1 已实现：
 4. 自检允许写 `<datadir>\selftest.log` 与一次 GeoIP 查询的 `geocache.json` 缓存。
 
 命令行（已实现）：`--background|--minimized`、`--show`、`--daemon <秒>`、`--datadir <路径>`、
-`--selftest|--test`、`--mutex-tag <标签>`、`--autostart-on/off`。
+`--selftest|--test`、`--mutex-tag <标签>`、`--autostart-on/off`、`--quit|--exit`（优雅退出）。
 
 ## 9. P1 已实现项与待办
 

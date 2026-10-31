@@ -28,8 +28,10 @@ namespace NetWatcher
         readonly bool background;
         readonly string dataDir;
         readonly System.Threading.EventWaitHandle activateEvent;
+        readonly System.Threading.EventWaitHandle quitEvent;
         Monitor monitor;
         NotifyIcon tray;
+        ContextMenuStrip trayMenu;
         ToolTip toolTip;
         System.Windows.Forms.Timer timer;
         System.Windows.Forms.Timer trayRetryTimer;
@@ -106,12 +108,13 @@ namespace NetWatcher
         // =============================================================
         // 构造 / 生命周期
         // =============================================================
-        public MainForm(AppConfig cfg, bool background, Monitor monitor, System.Threading.EventWaitHandle activateEvent, string dataDir)
+        public MainForm(AppConfig cfg, bool background, Monitor monitor, System.Threading.EventWaitHandle activateEvent, System.Threading.EventWaitHandle quitEvent, string dataDir)
         {
             this.cfg = cfg;
             this.background = background;
             this.monitor = monitor;
             this.activateEvent = activateEvent;
+            this.quitEvent = quitEvent;
             this.dataDir = dataDir;
             selectedDate = DateTime.Now.ToString(DateFmt);
             adminMode = SafeIsAdmin();
@@ -132,20 +135,32 @@ namespace NetWatcher
         // 第二个实例启动时通知本实例：把窗口显示出来（修复"提示已在运行但托盘找不到"）
         void StartActivationListener()
         {
-            if (activateEvent == null) return;
+            if (activateEvent == null && quitEvent == null) return;
             System.Threading.Thread th = new System.Threading.Thread(delegate()
             {
+                System.Threading.EventWaitHandle[] waits;
+                if (activateEvent != null && quitEvent != null) waits = new System.Threading.EventWaitHandle[] { activateEvent, quitEvent };
+                else if (activateEvent != null) waits = new System.Threading.EventWaitHandle[] { activateEvent };
+                else waits = new System.Threading.EventWaitHandle[] { quitEvent };
                 while (!reallyExiting)
                 {
                     try
                     {
-                        if (!activateEvent.WaitOne(2000)) continue;
+                        int idx = System.Threading.WaitHandle.WaitAny(waits, 2000);
+                        if (idx == System.Threading.WaitHandle.WaitTimeout) continue;
                         if (reallyExiting) return;
+                        if (waits[idx] == quitEvent)
+                        {
+                            // --quit：另一个进程请求本实例优雅退出（保存数据、移除托盘图标）
+                            try { BeginInvoke((MethodInvoker)delegate { ExitApp(); }); } catch { }
+                            return;
+                        }
                         try
                         {
                             BeginInvoke((MethodInvoker)delegate
                             {
-                                EnsureTray();
+                                if (reallyExiting) return;
+                                if (tray == null) BuildTray();
                                 ShowMain();
                             });
                         }
@@ -160,18 +175,30 @@ namespace NetWatcher
         }
 
         // 托盘图标兜底：开机自启时资源管理器可能还没准备好通知区域，重试可避免"进程在、托盘没有"
+        // 2.1.1：只保证托盘图标存在，不再每次 Visible=false→true 反复重加。
+        // 反复重加正是 Windows 通知区域出现"重复/幽灵图标"（鼠标划过才消失）的诱因之一。
         void EnsureTray()
         {
             try
             {
-                if (tray == null)
-                {
-                    BuildTray();
-                    Trace("托盘图标已重建");
-                    return;
-                }
-                tray.Visible = false;
-                tray.Visible = true;
+                if (reallyExiting) return;
+                if (tray == null) { BuildTray(); return; }
+                if (!tray.Visible) tray.Visible = true;
+            }
+            catch { }
+        }
+
+        // 仅在两种情况下使用：资源管理器重启（TaskbarCreated）或开机自启后通知区域尚未就绪。
+        // 先干净移除旧图标（Dispose 会发 NIM_DELETE），再新建一个，避免同一图标被重复 NIM_ADD。
+        void ReAddTrayIcon()
+        {
+            if (reallyExiting) return;
+            try
+            {
+                if (tray != null) { tray.Visible = false; tray.Dispose(); tray = null; }
+                if (trayMenu != null) { trayMenu.Dispose(); trayMenu = null; }
+                BuildTray();
+                Trace("托盘图标已重建");
             }
             catch { }
         }
@@ -181,7 +208,7 @@ namespace NetWatcher
             // 资源管理器重启后（TaskbarCreated 广播）重新添加托盘图标
             if (m.Msg == WM_TASKBARCREATED)
             {
-                EnsureTray();
+                ReAddTrayIcon();
             }
             base.WndProc(ref m);
         }
@@ -203,17 +230,15 @@ namespace NetWatcher
                 ShowInTaskbar = false;
                 WindowState = FormWindowState.Minimized;
                 Hide();
-                // 前 30 秒每 3 秒补一次托盘图标（开机自启场景下通知区域可能尚未就绪）
+                // 2.1.1：启动后只补一次托盘图标（3 秒时重建一次），随后立即停止定时器。
+                // 不再每 3 秒 × 10 次做 Visible=false→true（那是"分身/幽灵图标"的主要来源）。
                 trayRetryTimer = new System.Windows.Forms.Timer();
                 trayRetryTimer.Interval = 3000;
                 trayRetryTimer.Tick += delegate
                 {
                     trayRetryCount++;
-                    EnsureTray();
-                    if (trayRetryCount >= 10)
-                    {
-                        try { trayRetryTimer.Stop(); trayRetryTimer.Dispose(); } catch { }
-                    }
+                    if (!reallyExiting && trayRetryCount == 1) ReAddTrayIcon();
+                    try { trayRetryTimer.Stop(); trayRetryTimer.Dispose(); trayRetryTimer = null; } catch { }
                 };
                 trayRetryTimer.Start();
             }
@@ -2003,17 +2028,18 @@ namespace NetWatcher
 
         void BuildTray()
         {
+            if (tray != null) return;   // 2.1.1：保证同一时刻只有一个 NotifyIcon
             tray = new NotifyIcon();
             tray.Icon = LoadAppIcon();
             tray.Text = "IP监控2.1（NetWatcher）";
             tray.Visible = true;
 
-            ContextMenuStrip menu = new ContextMenuStrip();
-            menu.Items.Add("显示主窗口", null, delegate { ShowMain(); });
-            menu.Items.Add("刷新", null, delegate { ForceRefresh(); });
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("退出", null, delegate { ExitApp(); });
-            tray.ContextMenuStrip = menu;
+            trayMenu = new ContextMenuStrip();
+            trayMenu.Items.Add("显示主窗口", null, delegate { ShowMain(); });
+            trayMenu.Items.Add("刷新", null, delegate { ForceRefresh(); });
+            trayMenu.Items.Add(new ToolStripSeparator());
+            trayMenu.Items.Add("退出", null, delegate { ExitApp(); });
+            tray.ContextMenuStrip = trayMenu;
             tray.DoubleClick += delegate { ShowMain(); };
         }
 
@@ -2053,7 +2079,13 @@ namespace NetWatcher
         void ExitApp()
         {
             reallyExiting = true;
-            try { if (timer != null) timer.Stop(); }
+            // 2.1.1：先停掉托盘补偿定时器，避免退出过程中 Tick 再次 BuildTray()，在系统通知区域留下"幽灵图标"。
+            try
+            {
+                if (trayRetryTimer != null) { trayRetryTimer.Stop(); trayRetryTimer.Dispose(); trayRetryTimer = null; }
+            }
+            catch { }
+            try { if (timer != null) { timer.Stop(); timer.Dispose(); timer = null; } }
             catch { }
             try { monitor.Stop(); }
             catch { }
@@ -2065,9 +2097,10 @@ namespace NetWatcher
                     tray.Dispose();
                     tray = null;
                 }
+                if (trayMenu != null) { trayMenu.Dispose(); trayMenu = null; }
             }
             catch { }
-            try { if (toolTip != null) toolTip.Dispose(); }
+            try { if (toolTip != null) { toolTip.Dispose(); toolTip = null; } }
             catch { }
             Close();
         }

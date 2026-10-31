@@ -115,6 +115,7 @@ namespace NetWatcher
                 bool autostartOn = false, autostartOff = false;
                 int daemonSeconds = 0;
                 string mutexTag = "";
+                bool quitRequested = false;
                 for (int i = 0; i < args.Length; i++)
                 {
                     string a = args[i];
@@ -126,10 +127,38 @@ namespace NetWatcher
                     else if (a == "--datadir" && i + 1 < args.Length) { dataDir = args[++i]; }
                     else if (a == "--daemon" && i + 1 < args.Length) { int.TryParse(args[++i], out daemonSeconds); }
                     else if (a == "--mutex-tag" && i + 1 < args.Length) { mutexTag = args[++i]; }
+                    else if (a == "--quit" || a == "--exit") { quitRequested = true; }
                 }
 
                 if (autostartOn) { Startup.SetEnabled(true, dataDir); return; }
                 if (autostartOff) { Startup.SetEnabled(false); return; }
+
+                // 2.1.1：--quit / --exit —— 请求已在运行的实例优雅退出（保存数据、移除托盘图标），
+                // 便于脚本/自动化测试停掉程序，不必强制结束进程（强杀容易在通知区域留下幽灵图标）。
+                if (quitRequested)
+                {
+                    string qMutex = "NetWatcher2.1_SingleInstance_Mutex";
+                    if (!string.IsNullOrEmpty(mutexTag)) qMutex += "_" + mutexTag;
+                    try
+                    {
+                        using (EventWaitHandle qe = EventWaitHandle.OpenExisting(qMutex + "_Quit"))
+                        {
+                            qe.Set();
+                            // 最多等 5 秒，确认主实例已退出（名字对应的 Mutex 内核对象消失）
+                            for (int i = 0; i < 50; i++)
+                            {
+                                try { using (Mutex probe = Mutex.OpenExisting(qMutex)) { Thread.Sleep(100); } }
+                                catch { break; }
+                            }
+                        }
+                        return;
+                    }
+                    catch
+                    {
+                        Environment.ExitCode = 1;   // 没有正在运行的实例
+                        return;
+                    }
+                }
 
                 AppConfig cfg = AppConfig.Load(dataDir);
                 // 2.1 修复（P1-5）：开机自启以注册表实际状态为准（install.ps1 / --autostart-on 不写 config.json）
@@ -250,6 +279,9 @@ namespace NetWatcher
                 EventWaitHandle activateEvent = null;
                 try { activateEvent = new EventWaitHandle(false, EventResetMode.AutoReset, activateName); }
                 catch { }
+                EventWaitHandle quitEvent = null;
+                try { quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, mutexName + "_Quit"); }
+                catch { }
 
                 AppendStartup(effectiveDir, "Program: 单实例就绪 args=" + string.Join(" ", args));
 
@@ -282,7 +314,7 @@ namespace NetWatcher
                 {
                     // 2.1 修复（P1-6）：「启动时最小化」原来是死设置，现在与 --background 一样生效；--show 强制显示
                     bool startHidden = background || (cfg.StartMinimized && !showRequested);
-                    MainForm form = new MainForm(cfg, startHidden, monitor, activateEvent, effectiveDir);
+                    MainForm form = new MainForm(cfg, startHidden, monitor, activateEvent, quitEvent, effectiveDir);
                     AppendStartup(effectiveDir, "Program: MainForm 已创建");
                     Application.Run(form);
                     AppendStartup(effectiveDir, "Program: Application.Run 退出");
