@@ -90,7 +90,19 @@ namespace NetWatcher
             loaded.date = today;
             current = loaded;
             currentDate = today;
-            // 恢复「上一采样仍活跃的 IP」，避免重启后 sessionCount / isNew 被重复计数
+            NormalizeSampleBuckets(current);
+            // 2.2.0 收口：isNew（「今天新出现」/NEW 标记/活动筛选）语义 ——
+            //   「该 IP 在本地日界的当天数据里首次出现」。isNew 只给 UI 用、不落盘（[ScriptIgnore]），
+            //   所以重启后按 firstSeenUnix 重建：今天文件里出现过的 IP 只要 firstSeenUnix 落在今天，
+            //   就仍算「今天出现过的 IP」，避免重启后 NEW 标记/「今天新出现」筛选全部丢失。
+            //   （同一天内正常运行时，isNew 在首次出现时置 true 并保持到跨日；跨日后新文件重新判定。）
+            long todayStart = LocalDayStartUnix(DateTime.Today);
+            foreach (KeyValuePair<string, IpAggregate> kv in current.ips)
+            {
+                if (kv.Value == null) continue;
+                kv.Value.isNew = kv.Value.firstSeenUnix > 0 && kv.Value.firstSeenUnix >= todayStart;
+            }
+            // 恢复「上一采样仍活跃的 IP」，避免重启后 sessionCount 被重复计数
             if (current.lastSampleUnix > 0)
             {
                 foreach (KeyValuePair<string, IpAggregate> kv in current.ips)
@@ -124,6 +136,23 @@ namespace NetWatcher
         public static long NowUnix()
         {
             return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+        }
+
+        static readonly DateTime UnixEpochUtc = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        // 2.2.0 收口：本地日界的 0 点 → unix 秒（趋势页 x 轴 / isNew 判定共用）。
+        // 用 TimeZoneInfo 转换以正确处理时区；极少数系统时区在 DST 跳变点会抛异常，回退到 ToUniversalTime。
+        internal static long LocalDayStartUnix(DateTime day)
+        {
+            DateTime local = DateTime.SpecifyKind(day.Date, DateTimeKind.Unspecified);
+            try
+            {
+                return (long)(TimeZoneInfo.ConvertTimeToUtc(local, TimeZoneInfo.Local) - UnixEpochUtc).TotalSeconds;
+            }
+            catch
+            {
+                return (long)(local.ToUniversalTime() - UnixEpochUtc).TotalSeconds;
+            }
         }
 
         void Run()
@@ -358,13 +387,20 @@ namespace NetWatcher
                 if (precise) current.bytesPrecise = true;
 
                 // 分钟桶（最多 1440 条 = 24 小时）
+                // 2.2.0 收口：保持「按分钟升序 + 每分钟唯一」的不变量（趋势页直接依赖它）。
+                // 系统时钟回拨/被校时会算出更早的分钟：旧实现直接 Append 会产生乱序，
+                // 趋势页就会画出“回跳竖线”；这里按分钟二分插入/就地累加，从生产者侧就杜绝乱序。
                 long minute = unix - (unix % 60);
-                if (current.samples.Count == 0 || current.samples[current.samples.Count - 1][0] != minute)
-                    current.samples.Add(new long[] { minute, deltaIn, deltaOut });
+                int minutePos = FindSampleMinute(current.samples, minute);
+                if (minutePos >= 0)
+                {
+                    long[] bucket = current.samples[minutePos];
+                    bucket[1] += deltaIn;
+                    bucket[2] += deltaOut;
+                }
                 else
                 {
-                    long[] lastb = current.samples[current.samples.Count - 1];
-                    lastb[1] += deltaIn; lastb[2] += deltaOut;
+                    current.samples.Insert(~minutePos, new long[] { minute, deltaIn, deltaOut });
                 }
                 while (current.samples.Count > 1440) current.samples.RemoveAt(0);
 
@@ -390,7 +426,8 @@ namespace NetWatcher
                     if (!prevActiveIps.Contains(ip))
                     {
                         a.sessionCount++;
-                        a.isNew = true;
+                        // 2.2.0 收口：这里不再重复置 isNew——「今天新出现」只由「首次出现」决定；
+                        // 同一天内断线重连不算“新出现”。重启后由构造函数按 firstSeenUnix 重建。
                     }
 
                     long[] b = perIpBytes[ip];
@@ -630,6 +667,55 @@ namespace NetWatcher
             string v;
             if (CnFix.TryGetValue(s, out v)) return v;
             return s;
+        }
+
+        // 2.2.0 收口：载入旧数据时归一化分钟桶——去掉畸形项、按分钟升序、同分钟合并求和。
+        // 2.0/2.1 的历史文件在系统时钟回拨时可能留下乱序/重复分钟；趋势页与 FindSampleMinute
+        // 的二分插入都要求「升序 + 分钟唯一」，所以在接管当天数据时先做一次性归一化。
+        static void NormalizeSampleBuckets(DayData d)
+        {
+            if (d == null || d.samples == null || d.samples.Count == 0) return;
+            List<long[]> valid = new List<long[]>(d.samples.Count);
+            for (int i = 0; i < d.samples.Count; i++)
+            {
+                long[] s = d.samples[i];
+                if (s == null || s.Length < 3) continue;
+                valid.Add(s);
+            }
+            valid.Sort(delegate(long[] a, long[] b) { return a[0].CompareTo(b[0]); });
+            List<long[]> merged = new List<long[]>(valid.Count);
+            for (int i = 0; i < valid.Count; i++)
+            {
+                long[] s = valid[i];
+                if (merged.Count > 0 && merged[merged.Count - 1][0] == s[0])
+                {
+                    long[] last = merged[merged.Count - 1];
+                    last[1] += s[1];
+                    last[2] += s[2];
+                }
+                else
+                {
+                    merged.Add(new long[] { s[0], s[1], s[2] });
+                }
+            }
+            while (merged.Count > 1440) merged.RemoveAt(0);
+            d.samples = merged;
+        }
+
+        // 2.2.0 收口：在「按分钟升序」的 samples 里二分查找指定分钟。
+        // 返回下标（命中）或 ~插入位置（未命中），保证插入后仍升序。
+        static int FindSampleMinute(List<long[]> samples, long minute)
+        {
+            int lo = 0, hi = samples.Count - 1;
+            while (lo <= hi)
+            {
+                int mid = lo + (hi - lo) / 2;
+                long v = samples[mid][0];
+                if (v == minute) return mid;
+                if (v < minute) lo = mid + 1;
+                else hi = mid - 1;
+            }
+            return ~lo;
         }
 
         static string ProcKey(ConnEntry c)
