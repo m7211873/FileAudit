@@ -56,6 +56,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 # JavaScriptSerializer 来自 System.Web.Extensions（与程序自身 JSON 序列化器一致）
 Add-Type -AssemblyName System.Web.Extensions | Out-Null
+# v2.3.0：.nwipdb 加密小时文件只读适配层（明文头/DPAPI+AES+HMAC+GZip 解密/按日合并）
+. (Join-Path $PSScriptRoot 'nwipdb-format.ps1')
 
 # ------------------------------------------------------------------ 路径与运行参数
 $RunTag = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -402,10 +404,11 @@ Add-Info 'R5_REALDATA_BASELINE' ("{0}  文件数={1}  size+mtime+SHA256 已记�
 try {
     # ============================================================== R1 同日重启累积
     if ($script:CanRun) {
-        Write-Section ("R1 同日重启累积（--daemon {0}s x2，datadir A）" -f $Seconds)
+        Write-Section ("R1 同日重启累积（--daemon {0}s x2，datadir A；v2.3.0 加密小时文件）" -f $Seconds)
         try {
             Initialize-TestDataDir $DataA
             $r1a = $null; $r1b = $null
+            $files1 = @(); $files2 = @()
             $daemon1 = Invoke-ExeWithExitCode -Tag 'r1-daemon1' -Arguments @('--daemon', "$Seconds", '--datadir', $DataA, '--mutex-tag', $MutexTag) -TimeoutSec ($Seconds + 90)
             if ($daemon1.TimedOut) {
                 Fail 'R1_DAEMON1_EXIT' ("{0}s 内未退出（已清理）" -f ($Seconds + 90))
@@ -414,19 +417,17 @@ try {
             } else {
                 Fail 'R1_DAEMON1_EXIT' ("退出码={0}（期望 0）elapsed={1}s stdout={2}" -f $daemon1.ExitCode, $daemon1.ElapsedSec, $daemon1.StdoutLog)
             }
-            $dayFile1 = Get-NewestDayFile $DataA
-            if (-not $dayFile1) {
-                Fail 'R1_DAEMON1_DATA' ("{0}\data 下没有 *.json" -f $DataA)
+            $files1 = Get-NwipdbFiles -DataDir $DataA -Date $Today
+            $r1a = Get-DayMergedSummary -DataDir $DataA -Date $Today
+            if ($files1.Count -lt 1) {
+                Fail 'R1_DAEMON1_DATA' ("{0}\data 下没有今天的 *.nwipdb（v2.3.0 小时文件）" -f $DataA)
+            } elseif (-not $r1a.Ok) {
+                Fail 'R1_DAEMON1_DATA' ("小时文件合并/解密失败: {0}（文件 {1} 个）" -f $r1a.Error, $files1.Count)
             } else {
-                $r1a = Read-DaySummary $dayFile1.FullName
-                if ($r1a.ParseOk) {
-                    Pass 'R1_DAEMON1_DATA' ("{0}  size={1:N0}B  sampleCount={2}  bytesIn={3:N0}  bytesOut={4:N0}  firstSampleUnix={5}" -f $r1a.Name, $r1a.Size, $r1a.SampleCount, $r1a.BytesIn, $r1a.BytesOut, $r1a.FirstSampleUnix)
-                } else {
-                    Fail 'R1_DAEMON1_DATA' ("JSON 解析失败: {0}" -f $r1a.Error)
-                }
+                Pass 'R1_DAEMON1_DATA' ("{0} 个今天小时文件  sampleCount={1}  bytesIn={2:N0}  bytesOut={3:N0}  分钟桶={4}  firstSampleUnix={5}" -f $files1.Count, $r1a.SampleCount, $r1a.BytesIn, $r1a.BytesOut, $r1a.SamplesCount, $r1a.FirstSampleUnix)
             }
 
-            if ($r1a -and $r1a.ParseOk) {
+            if ($r1a -and $r1a.Ok) {
                 Start-Sleep -Milliseconds 400
                 $daemon2 = Invoke-ExeWithExitCode -Tag 'r1-daemon2' -Arguments @('--daemon', "$Seconds", '--datadir', $DataA, '--mutex-tag', $MutexTag) -TimeoutSec ($Seconds + 90)
                 if ($daemon2.TimedOut) {
@@ -436,37 +437,47 @@ try {
                 } else {
                     Fail 'R1_DAEMON2_EXIT' ("退出码={0}（期望 0）elapsed={1}s" -f $daemon2.ExitCode, $daemon2.ElapsedSec)
                 }
-                $dayFile2 = Get-NewestDayFile $DataA
-                $r1b = if ($dayFile2) { Read-DaySummary $dayFile2.FullName } else { $null }
-                if (-not $r1b -or -not $r1b.ParseOk) {
-                    Fail 'R1_SAME_DAY_RESUME' '第二次 daemon 后 data\*.json 缺失或不可解析'
+                $files2 = Get-NwipdbFiles -DataDir $DataA -Date $Today
+                $r1b = Get-DayMergedSummary -DataDir $DataA -Date $Today
+                if (-not $r1b -or -not $r1b.Ok) {
+                    Fail 'R1_SAME_DAY_RESUME' ("第二次 daemon 后今天的 .nwipdb 合并失败: {0}" -f $(if ($r1b) { $r1b.Error } else { '无' }))
                 } else {
-                    Add-Info 'R1_VALUES' ("第一次: sampleCount={0} bytesIn={1:N0} bytesOut={2:N0} firstSampleUnix={3}" -f $r1a.SampleCount, $r1a.BytesIn, $r1a.BytesOut, $r1a.FirstSampleUnix)
-                    Add-Info 'R1_VALUES' ("第二次: sampleCount={0} bytesIn={1:N0} bytesOut={2:N0} firstSampleUnix={3}" -f $r1b.SampleCount, $r1b.BytesIn, $r1b.BytesOut, $r1b.FirstSampleUnix)
-                    if ($r1b.SampleCount -ge ($r1a.SampleCount + 1)) {
-                        Pass 'R1_SAMPLE_COUNT_GROWTH' ("sampleCount {0} -> {1}（>= +1，累积已恢复）" -f $r1a.SampleCount, $r1b.SampleCount)
+                    Add-Info 'R1_VALUES' ("第一次: 文件={0} sampleCount={1} bytesIn={2:N0} bytesOut={3:N0} firstSampleUnix={4}" -f $files1.Count, $r1a.SampleCount, $r1a.BytesIn, $r1a.BytesOut, $r1a.FirstSampleUnix)
+                    Add-Info 'R1_VALUES' ("第二次: 文件={0} sampleCount={1} bytesIn={2:N0} bytesOut={3:N0} firstSampleUnix={4}" -f $files2.Count, $r1b.SampleCount, $r1b.BytesIn, $r1b.BytesOut, $r1b.FirstSampleUnix)
+                    # v2.3.0 新判据：每次启动必建新小时文件（同小时多 session 文件）
+                    if ($files2.Count -gt $files1.Count) {
+                        Pass 'R1_SESSION_FILE_GROWTH' ("每次启动新增小时文件：{0} -> {1} 个（{2}）" -f $files1.Count, $files2.Count, (($files2 | ForEach-Object { $_.Name }) -join ','))
                     } else {
-                        Fail 'R1_SAMPLE_COUNT_GROWTH' ("sampleCount {0} -> {1}（期望 >= {2}；疑似重启后未 LoadDay，第一次落盘覆盖了当天累计）" -f $r1a.SampleCount, $r1b.SampleCount, ($r1a.SampleCount + 1))
+                        Fail 'R1_SESSION_FILE_GROWTH' ("重启后未新增小时文件：{0} -> {1}（v2.3.0 要求每次启动必建新文件）" -f $files1.Count, $files2.Count)
+                    }
+                    if ($r1b.SampleCount -ge ($r1a.SampleCount + 1)) {
+                        Pass 'R1_SAMPLE_COUNT_GROWTH' ("同日合并 sampleCount {0} -> {1}（>= +1，累积已恢复）" -f $r1a.SampleCount, $r1b.SampleCount)
+                    } else {
+                        Fail 'R1_SAMPLE_COUNT_GROWTH' ("sampleCount {0} -> {1}（期望 >= {2}；疑似重启后未 LoadDay 合并，第一次写盘覆盖了当天累计）" -f $r1a.SampleCount, $r1b.SampleCount, ($r1a.SampleCount + 1))
                     }
                     if ($r1a.FirstSampleUnix -gt 0 -and $r1b.FirstSampleUnix -eq $r1a.FirstSampleUnix) {
-                        Pass 'R1_FIRST_SAMPLE_UNIX' ("firstSampleUnix={0} 保持不变" -f $r1b.FirstSampleUnix)
+                        Pass 'R1_FIRST_SAMPLE_UNIX' ("合并 firstSampleUnix={0} 保持不变" -f $r1b.FirstSampleUnix)
                     } else {
                         Fail 'R1_FIRST_SAMPLE_UNIX' ("firstSampleUnix {0} -> {1}（期望不变且 >0）" -f $r1a.FirstSampleUnix, $r1b.FirstSampleUnix)
                     }
                     if ($r1b.BytesIn -ge $r1a.BytesIn -and $r1b.BytesOut -ge $r1a.BytesOut) {
-                        Pass 'R1_BYTES_NO_REGRESS' ("bytesIn {0:N0} -> {1:N0}；bytesOut {2:N0} -> {3:N0}（不回退）" -f $r1a.BytesIn, $r1b.BytesIn, $r1a.BytesOut, $r1b.BytesOut)
+                        Pass 'R1_BYTES_NO_REGRESS' ("合并 bytesIn {0:N0} -> {1:N0}；bytesOut {2:N0} -> {3:N0}（不回退）" -f $r1a.BytesIn, $r1b.BytesIn, $r1a.BytesOut, $r1b.BytesOut)
                     } else {
                         Fail 'R1_BYTES_NO_REGRESS' ("bytes 回退：in {0:N0} -> {1:N0}，out {2:N0} -> {3:N0}" -f $r1a.BytesIn, $r1b.BytesIn, $r1a.BytesOut, $r1b.BytesOut)
                     }
-                    if ($r1b.Date -eq $Today -and $r1a.Date -eq $Today -and $r1b.Name -eq $r1a.Name) {
-                        Pass 'R1_SAME_DAY_FILE' ("同一文件 {0} date={1}" -f $r1b.Name, $r1b.Date)
+                    $badDate = @($files2 | Where-Object { $_.Date -ne $Today })
+                    if ($files2.Count -ge 2 -and $badDate.Count -eq 0 -and ($files2 | Where-Object { $_.Kind -eq 'hour' }).Count -ge 2) {
+                        Pass 'R1_SAME_DAY_FILES' ("今天小时文件 {0} 个且日期均为 {1}（{2} 种 session）" -f $files2.Count, $Today, (($files2 | ForEach-Object { $_.Kind }) -join ','))
                     } else {
-                        Fail 'R1_SAME_DAY_FILE' ("日期/文件名不一致：{0}/{1} date {2}->{3}" -f $r1a.Name, $r1b.Name, $r1a.Date, $r1b.Date)
+                        Fail 'R1_SAME_DAY_FILES' ("同一天小时文件异常：{0} 个，非今天 {1} 个" -f $files2.Count, $badDate.Count)
                     }
                 }
             }
             $daemonLogA = Join-Path $DataA 'daemon.log'
             if (Test-Path $daemonLogA) { Add-Info 'R1_DAEMON_LOG' ("{0} 存在（{1:N0}B）" -f $daemonLogA, (Get-Item $daemonLogA).Length) }
+            $keyA = Get-NwipdbKeyInfo -DataDir $DataA
+            if ($keyA.Exists -and $keyA.Valid) { Pass 'R1_STOREKEY' ("data\{0} 已生成且 magic 正确（{1}B）" -f $script:NwipdbFormat.KeyPathName, $keyA.Length) }
+            else { Fail 'R1_STOREKEY' ("未生成有效密钥文件 data\{0}（Exists={1} Magic={2}）" -f $script:NwipdbFormat.KeyPathName, $keyA.Exists, $keyA.Magic) }
         } catch {
             Fail 'R1_UNEXPECTED' ("异常: " + $_.Exception.Message + " @ line " + $_.InvocationInfo.ScriptLineNumber)
         }
@@ -588,7 +599,7 @@ try {
             } else {
                 Warn 'R3_TEMP_VALUE_EVIDENCE' '无 selftest.log，无法检查自启测试证据'
             }
-            if ($stText -match '未触碰\s*data') {
+            if ($stText -match '(不触碰真实|未触碰)\s*data') {
                 Pass 'R2_STORAGE_TEST_DECL' 'selftest.log 声明存储测试使用独立目录、未触碰 data\'
             } else {
                 Add-Info 'R2_STORAGE_TEST_DECL' 'selftest.log 未出现「未触碰 data」说明（不影响 SHA 判定）'
@@ -608,28 +619,32 @@ try {
             $guiPid = Start-Gui -DataDir $DataB
             Add-Info 'R4_GUI' ("启动 GUI pid={0} datadir={1}" -f $guiPid, $DataB)
 
-            # 等 GUI 起来并落第一份数据（说明已越过 Store.Init + 抢到 data 锁 + Monitor 已启动）
+            # 等 GUI 起来并落第一份数据（v2.3.0：加密小时文件 .nwipdb；启动即建空小时文件并随采样写盘）
             $deadline = (Get-Date).AddSeconds($StartTimeoutSec)
             $guiAlive = $true
-            $guiDataFile = $null
+            $guiFiles = @()
             while ((Get-Date) -lt $deadline) {
                 if (-not (Get-Process -Id $guiPid -ErrorAction SilentlyContinue)) { $guiAlive = $false; break }
-                $guiDataFile = Get-NewestDayFile $DataB
-                if ($guiDataFile) { break }
+                $guiFiles = Get-NwipdbFiles -DataDir $DataB -Date $Today
+                if ($guiFiles.Count -ge 1) { break }
                 Start-Sleep -Milliseconds 300
             }
             if (-not $guiAlive) {
                 Fail 'R4_GUI_START' ("GUI 进程 pid={0} 提前退出（crash.log/startup.log 见 {1}）" -f $guiPid, $DataB)
-            } elseif (-not $guiDataFile) {
-                Fail 'R4_GUI_START' ("{0}s 内 GUI 未产生 data\*.json（pid={1}）" -f $StartTimeoutSec, $guiPid)
+            } elseif ($guiFiles.Count -lt 1) {
+                Fail 'R4_GUI_START' ("{0}s 内 GUI 未产生今天的加密小时文件（data\*.nwipdb，pid={1}）" -f $StartTimeoutSec, $guiPid)
             } else {
-                Pass 'R4_GUI_START' ("GUI pid={0} 存活并已落盘 {1}" -f $guiPid, $guiDataFile.Name)
+                Pass 'R4_GUI_START' ("GUI pid={0} 存活并已落盘加密小时文件 {1}" -f $guiPid, (($guiFiles | ForEach-Object { $_.Name }) -join ','))
             }
 
-            if ($guiAlive -and $guiDataFile) {
+            if ($guiAlive -and $guiFiles.Count -ge 1) {
                 Start-Sleep -Milliseconds 800   # 确保 GUI 已持有 data 锁
-                $r4Before = Read-DaySummary (Get-NewestDayFile $DataB)
-                Add-Info 'R4_GUI_DATA_BEFORE' ("sampleCount={0} bytesIn={1:N0} bytesOut={2:N0} sha={3}..." -f $r4Before.SampleCount, $r4Before.BytesIn, $r4Before.BytesOut, (Short-Sha $r4Before.Sha))
+                $r4Before = Get-DayMergedSummary -DataDir $DataB -Date $Today
+                if ($r4Before.Ok) {
+                    Add-Info 'R4_GUI_DATA_BEFORE' ("sampleCount={0} bytesIn={1:N0} bytesOut={2:N0} 文件={3}" -f $r4Before.SampleCount, $r4Before.BytesIn, $r4Before.BytesOut, $r4Before.Files)
+                } else {
+                    Add-Info 'R4_GUI_DATA_BEFORE' ("合并失败: {0}" -f $r4Before.Error)
+                }
 
                 # 同一 datadir + 同一 mutex-tag 起 daemon（2.1 数据锁由绝对 datadir 派生，必须抢不到）
                 $r4 = Invoke-ExeWithExitCode -Tag 'r4-daemon' -Arguments @('--daemon', "$R4DaemonSeconds", '--datadir', $DataB, '--mutex-tag', $MutexTag) -TimeoutSec ($R4DaemonSeconds + 60)
@@ -650,18 +665,15 @@ try {
                 if ($guiAliveAfter) { Pass 'R4_GUI_ALIVE' ("GUI pid={0} 在 daemon 冲突尝试后仍存活" -f $guiPid) }
                 else { Fail 'R4_GUI_ALIVE' ("GUI pid={0} 在 daemon 尝试后消失（疑似被抢锁逻辑误杀/自行退出）" -f $guiPid) }
 
-                # GUI 数据文件未被破坏：JSON 可解析、sampleCount/bytes 不回退
+                # GUI 数据文件未被破坏：加密小时文件仍可解密合并、sampleCount/bytes 不回退
                 Start-Sleep -Milliseconds 1500
-                $dayFileAfter = Get-NewestDayFile $DataB
-                $r4After = if ($dayFileAfter) { Read-DaySummary $dayFileAfter.FullName } else { $null }
-                if (-not $r4After -or -not $r4After.ParseOk) {
-                    Fail 'R4_DATA_INTACT' ("daemon 冲突尝试后 GUI 数据文件缺失/不可解析: {0}" -f $(if ($r4After) { $r4After.Error } else { '无文件' }))
-                } elseif ($r4After.SampleCount -lt $r4Before.SampleCount -or $r4After.BytesIn -lt $r4Before.BytesIn -or $r4After.BytesOut -lt $r4Before.BytesOut) {
+                $r4After = Get-DayMergedSummary -DataDir $DataB -Date $Today
+                if (-not $r4After.Ok) {
+                    Fail 'R4_DATA_INTACT' ("daemon 冲突尝试后 GUI 加密数据不可读/合并失败: {0}" -f $r4After.Error)
+                } elseif ($r4Before.Ok -and ($r4After.SampleCount -lt $r4Before.SampleCount -or $r4After.BytesIn -lt $r4Before.BytesIn -or $r4After.BytesOut -lt $r4Before.BytesOut)) {
                     Fail 'R4_DATA_INTACT' ("数据回退：sampleCount {0}->{1} bytesIn {2:N0}->{3:N0} bytesOut {4:N0}->{5:N0}" -f $r4Before.SampleCount, $r4After.SampleCount, $r4Before.BytesIn, $r4After.BytesIn, $r4Before.BytesOut, $r4After.BytesOut)
-                } elseif ($r4After.Date -ne $Today) {
-                    Fail 'R4_DATA_INTACT' ("数据日期异常: {0}（期望 {1}）" -f $r4After.Date, $Today)
                 } else {
-                    Pass 'R4_DATA_INTACT' ("JSON 可解析；sampleCount {0}->{1}，bytesIn {2:N0}->{3:N0}（不回退）" -f $r4Before.SampleCount, $r4After.SampleCount, $r4Before.BytesIn, $r4After.BytesIn)
+                    Pass 'R4_DATA_INTACT' ("加密小时文件可解密合并；sampleCount {0}->{1}，bytesIn {2:N0}->{3:N0}（不回退）" -f $r4Before.SampleCount, $r4After.SampleCount, $r4Before.BytesIn, $r4After.BytesIn)
                 }
 
                 # daemon.log 必须有冲突记录

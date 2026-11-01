@@ -1,8 +1,8 @@
 # NetWatcher QA（IP监控2.1 一键验收 + P0/P1 回归）
 
 本目录是 QA 归属区（design §7：QA 只写 `tools/qa/**`）。一键验收 = `verify.ps1`；
-P0 修复回归 = `regression-p0.ps1`；P1 修复回归 = `regression-p1.ps1`。全部脚本 UTF-8 BOM、PS 5.1 Parser 0 错误。
-**当前版本：2.2.1（5 标签，含「趋势」页；进程视图刷新保持展开/选中、默认全部折叠）；回归数字见下方「2.2.1 回归结果」。**
+P0 修复回归 = `regression-p0.ps1`；P1 修复回归 = `regression-p1.ps1`；v2.3.0 存储专项 = `regression-v230.ps1`（+ 只读适配层 `nwipdb-format.ps1`）。全部脚本 UTF-8 BOM、PS 5.1 Parser 0 错误。
+**当前版本：2.3.0（加密小时文件存储 `.nwipdb`：DPAPI+AES-256-CBC+HMAC-SHA256+GZip；每次启动新文件、按小时聚合、迁移旧 json；5 标签/趋势页/进程视图保持展开选中）；回归数字见下方「2.3.0 回归结果」。**
 
 ## 快速开始
 
@@ -18,7 +18,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\verify.ps1 -Screens
 ```
 退出码：有 FAIL → 1；全 PASS → 0。证据/报告输出到 `tools/qa/out/`，测试数据写 `%TEMP%\ipmon-qa-*`（仓库外）。
 
-## 2.2.1 回归结果（2026-11-01 补丁版，独立 QA 取证；代码 `6dffea3`）
+## 2.3.0 回归结果（2026-11-01 加密小时存储定版，独立 QA 取证；代码 `d634622`）
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| 编译 `build.bat` | **0 error / 0 warning**（含 `/r:System.Security.dll`）；`bin\NetWatcher.exe` 152,064 B、FileVersion/ProductVersion **2.3.0.0**、SHA256 `29E8180CE453BBD2…` | `out/build_*.log` |
+| P0 回归 `regression-p0.ps1` | **PASS=32 FAIL=0 WARN=0**（tag `20261101-181838`；R1 改为「每次启动新增小时文件 + 同日合并累加」、新增 R1_STOREKEY/R1_SAME_DAY_FILES） | `out/regression_20261101-181838.txt/.json` |
+| P1 回归 `regression-p1.ps1` | **PASS=39 FAIL=0 WARN=0**（tag `20261101-182356`；R9=2.3.0.0；R7 新增迁移断言 R7_MIGRATED） | `out/regression_p1_20261101-182356.txt/.json` |
+| 启动顺序 `regression-activation.ps1` | **PASS=9 FAIL=0**（临时目录 `nw21-act-cf020599`） | 同目录脚本输出 |
+| 托盘/退出 `regression-quit.ps1` | **PASS=6 FAIL=0**（临时目录 `nw21-quit-2121e735`；Q4 改为解密合并确认落盘） | 同目录脚本输出 |
+| 无界面 `verify.ps1 -SkipGui -Seconds 30 -AuditRealData` | **PASS=35 FAIL=0 WARN=0**（tag `20261101-182441`；含 5 项存储自检 + DATA_* 改 `.nwipdb` 解密校验） | `out/report_20261101-182441.txt/.json` |
+| GUI 5 标签 `verify.ps1 -Seconds 20 -MutexTag v230` | **PASS=59 FAIL=0 WARN=0**（tag `20261101-182539`；GUI 启动时把预置 json 迁移为 legacy `.nwipdb` 后验证趋势页） | `out/report_20261101-182539.txt/.json`、`out/gui_*_20261101-182539.png` |
+| 存储专项 `regression-v230.ps1`（H1~H7） | **PASS=28 FAIL=0 WARN=0 TODO=0**（tag `20261101-183214`） | `out/v230_20261101-183214.txt/.json` |
+
+- 存储专项 H1~H7（设计 §9）全部 PASS：
+  - H1 启动即生成空小时文件（`监控_<date>_<HH-00-00>_s<HHmmss>.nwipdb`、`.storekey` 270B、明文头 magic=NWIPDB01/version=1、payload 可解密；实测首个采样立即发生，见报告覆盖说明）；
+  - H2 实时落盘：8s 内 5 次文件变化（0/2.4/4.6/6.7/8.1s，每采样写，非 15s 批量）；
+  - H3 加密性：二进制、无明文 IP/字段名；截断坏文件与错误 `.storekey` 下 daemon 均 exit=0 不崩溃；
+  - H4 迁移：3 个真实 json 副本 → 3 个 `*_legacy*.nwipdb`、原 json 删除；legacy payload 与原 json **bytes/IP/进程/采样完全一致**；坏 json 保留不阻塞；
+  - H5 多会话：每次启动新增小时文件 1→2；同日合并 bytes/sampleCount 继续累加；
+  - H6 合并正确性：合并汇总 == 各文件求和、峰值取 max、samples 同分钟求和去重且升序、每桶字节合计 == 当天 bytes；
+  - H7 性能：selftest 实测「小时文件合并 24 文件 21ms <200ms」「历史概览 30 天首载 30ms <2000ms」；QA 侧 PowerShell 独立解密合并 2 文件 93.5ms 交叉验证。
+- 安全：所有迁移/加密测试只用 `_analysis\v230-验收\fixtures\real-data-copy\` 的真实数据**副本**；`%APPDATA%\NetWatcher` 各 run 前后 size+mtime+SHA256 全一致（真实 data 仍是 3 个旧 json、无 `.storekey`，迁移留到发布安装时由 Lead 备份后执行）。
+- 详细报告：`D:\IP监控2.1版\_analysis\v230-验收\02-回归.md`（含与 2.2.1 基线对比、H1~H7 明细、覆盖边界）。
+
+### 2.2.1 定版基线（2026-11-01，存档）
 
 | 项 | 结果 | 证据 |
 |---|---|---|
@@ -138,6 +162,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\verify.ps1 -SkipGui
   - `SELFTEST_ESTATS_DIAG`：按 rw×rod 诊断**组合数 >=6** 判定（design §6 矩阵 rw 1/4 × rod 48/16/1024），
     不再用「诊断行数 >=5」——行数 = 自检时远端连接数（随环境 3~5 变），会产生假 WARN。
   - 真实点击 `GUI_TAB_CLICK_REAL` 最多重试 3 次（并行 GUI 可能抢前台；3 次都失败仍判 FAIL）。
+
+### v2.3.0 加密小时文件适配（务必保留）
+
+- `nwipdb-format.ps1`（只读适配层，被 p0/p1/quit/verify/v230 脚本 dot-source）：文件名规则（`监控_<date>_<HH-00-00>_s<HHmmss>.nwipdb` / legacy 日块）、
+  96B 明文头解析（magic=NWIPDB01/version=1/长度校验）、DPAPI 解 `.storekey` → AES-256-CBC → HMAC-SHA256 校验 → GZip → DayData JSON、按日合并、二进制明文泄漏扫描、fixtures 读取。
+  未就绪/坏文件必须返回 `Ok=$false`，调用方判 FAIL/TODO，**禁止假 PASS**。
+- `regression-v230.ps1`：H1~H7 存储专项（`-PrepOnly` 为准备自查模式）；H7 直接解析 `--selftest` 的「小时文件合并 24 文件 / 历史概览 30 天首载」性能行。
+- `regression-p0.ps1` R1：改为「每次启动新增小时文件 + 同日合并继续累加（firstSampleUnix 不变/bytes 不回退）+ `.storekey` 生成」；
+  R2 selftest 只读仍成立（`--selftest` 不迁移：见 01-实现说明 §8）；R4 GUI 落盘断言改 `.nwipdb` 解密合并。
+- `regression-p1.ps1` R7：预置 1.0 假精确 json → daemon 迁移后断言 `R7_MIGRATED`/原 json 删除/合并后 bytesPrecise 降级/sampleCount 累积。
+- `regression-quit.ps1` Q4：退出后读今天的 `.nwipdb` 并解密合并，确认数据已落盘。
+- `verify.ps1`：`DATA_FILE/ATOMIC/STOREKEY/STORE_FORMAT/DECRYPT/…` 全部改读 `.nwipdb`（解密合并后校验总数/逐 IP/逐进程/诚实性）；
+  新增 `SELFTEST_STORAGE/STORE_CRYPTO/STORE_MIGRATION/STORE_READONLY/STORE_PERF`；GUI 数据守卫改为「预置 json 被迁移为 legacy `.nwipdb` + 本次小时文件被采样写盘」；
+  `-AuditRealData` 真实数据若已迁移为 `.nwipdb` 则只读明文头审计。
 
 ## 验收流程与检查项
 

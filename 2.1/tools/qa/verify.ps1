@@ -73,6 +73,8 @@ if (-not $OutDir) { $OutDir = Join-Path $PSScriptRoot 'out' }
 $OutDir = [IO.Path]::GetFullPath($OutDir)
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $RealDataDir = Join-Path $env:APPDATA 'NetWatcher'
+# v2.3.0：.nwipdb 加密小时文件只读适配层（明文头/DPAPI+AES+HMAC+GZip 解密/按日合并）
+. (Join-Path $PSScriptRoot 'nwipdb-format.ps1')
 
 if (-not $DataDir) { $DataDir = Join-Path $env:TEMP ("ipmon-qa-" + $RunTag) }
 $DataDir = [IO.Path]::GetFullPath($DataDir)
@@ -376,7 +378,11 @@ function Compare-Snapshot {
 function Get-DataFiles {
     param([string]$Dir)
     $files = @()
-    if (Test-Path $Dir) { $files = @(Get-ChildItem $Dir -Filter '*.json' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending) }
+    if (Test-Path $Dir) {
+        $files = @(Get-ChildItem $Dir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -eq '.nwipdb' -or $_.Extension -eq '.json' } |
+            Sort-Object LastWriteTime -Descending)
+    }
     return ,$files
 }
 
@@ -631,8 +637,22 @@ try {
         else { Fail 'SELFTEST_ESTATS_DIAG' '缺少 EStats rc/winerr 诊断行（design §6）' }
         foreach ($l in ($estatsDiag | Select-Object -First 6)) { Add-Info 'ESTATS_DIAG' $l }
 
-        if ([regex]::IsMatch($selfText, '(原子写/读|存储读写)[:：]\s*OK')) { Pass 'SELFTEST_STORAGE' '存储 原子写/读: OK' }
-        else { Fail 'SELFTEST_STORAGE' '缺少 "原子写/读: OK" / "存储读写: OK"' }
+        # v2.3.0 加密小时文件存储自检（01-实现说明.md §6）
+        if ([regex]::IsMatch($selfText, '小时文件加密往返[:：]\s*OK')) { Pass 'SELFTEST_STORAGE' '小时文件加密往返: OK（.nwipdb SaveHour/LoadDay 字段一致）' }
+        else { Fail 'SELFTEST_STORAGE' '缺少「小时文件加密往返: OK」（v2.3.0 存储自检）' }
+        if ([regex]::IsMatch($selfText, '加密性.*?[:：]\s*OK')) { Pass 'SELFTEST_STORE_CRYPTO' '加密性自检 OK（二进制 magic=NWIPDB01 / 无明文 IP）' }
+        else { Fail 'SELFTEST_STORE_CRYPTO' '缺少加密性自检 OK' }
+        if ([regex]::IsMatch($selfText, 'legacy JSON 迁移[:：]\s*OK')) { Pass 'SELFTEST_STORE_MIGRATION' 'selftest-store legacy JSON 迁移自检 OK（迁移 + 删原 JSON + 回读汇总）' }
+        else { Fail 'SELFTEST_STORE_MIGRATION' '缺少 legacy JSON 迁移自检 OK' }
+        if ([regex]::IsMatch($selfText, '真实 data\\? 未被 selftest 改写[:：]\s*OK')) { Pass 'SELFTEST_STORE_READONLY' '真实 data\ 未被 selftest 改写: OK（只读护栏）' }
+        else { Fail 'SELFTEST_STORE_READONLY' '缺少「真实 data\ 未被 selftest 改写: OK」' }
+        $mergePerf = [regex]::Match($selfText, '小时文件合并\s*24\s*文件[:：]\s*(\d+)\s*ms')
+        $histPerf = [regex]::Match($selfText, '历史概览\s*30\s*天首载[:：]\s*(\d+)\s*ms')
+        if ($mergePerf.Success -and $histPerf.Success) {
+            $mm = [int]$mergePerf.Groups[1].Value; $hm = [int]$histPerf.Groups[1].Value
+            if ($mm -lt 200 -and $hm -lt 2000) { Pass 'SELFTEST_STORE_PERF' ("H7: 小时文件合并24文件 {0}ms <200ms；历史概览30天首载 {1}ms <2000ms" -f $mm, $hm) }
+            else { Fail 'SELFTEST_STORE_PERF' ("H7 性能超预算：合并24文件 {0}ms / 历史30天首载 {1}ms" -f $mm, $hm) }
+        } else { Fail 'SELFTEST_STORE_PERF' '缺少 H7 性能自检行（小时文件合并 24 文件 / 历史概览 30 天首载）' }
 
         # 开机自启注册表读写（2.1 P0-3：必须只写/删临时值名，绝不改真实 Run 值）
         $mregTemp = [regex]::Match($selfText, '临时值写入后[^\r\n]*')
@@ -742,8 +762,9 @@ try {
             if (-not $exitB) { [void](Stop-QaProcess -ProcessId $mB) }
             $filesA = @()
             $filesB = @()
-            if (Test-Path (Join-Path $mutexDirA 'data')) { $filesA = @(Get-ChildItem (Join-Path $mutexDirA 'data') -Filter '*.json' -File -ErrorAction SilentlyContinue) }
-            if (Test-Path (Join-Path $mutexDirB 'data')) { $filesB = @(Get-ChildItem (Join-Path $mutexDirB 'data') -Filter '*.json' -File -ErrorAction SilentlyContinue) }
+            $filesA = @(); $filesB = @()
+            if (Test-Path (Join-Path $mutexDirA 'data')) { $filesA = @(Get-ChildItem (Join-Path $mutexDirA 'data') -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.nwipdb','.json') }) }
+            if (Test-Path (Join-Path $mutexDirB 'data')) { $filesB = @(Get-ChildItem (Join-Path $mutexDirB 'data') -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.nwipdb','.json') }) }
             if ($aliveA -and $aliveB -and $exitA -and $exitB -and $filesA.Count -gt 0 -and $filesB.Count -gt 0) {
                 Pass 'MUTEX_TAG_DIFF' ("不同 datadir + 不同 --mutex-tag 的两个 --daemon {0} 并发均成功（{1}-a / {1}-b，各写出数据文件；2.1 单写锁按绝对 datadir 派生，必须 datadir 不同才允许并发）" -f $mutexSecs, $MutexTag)
             } else {
@@ -752,61 +773,61 @@ try {
         } catch { Fail 'MUTEX_TAG_DIFF' ("启动失败: " + $_.Exception.Message) }
     }
 
-    # -------------------------------------------------------------- 4. 引擎数据校验
-    Write-Section '4. 采集数据校验 (data\*.json)'
-    $dataFiles = Get-DataFiles -Dir $DataSubDir
+    # -------------------------------------------------------------- 4. 引擎数据校验（v2.3.0 加密小时文件）
+    Write-Section '4. 采集数据校验 (data\*.nwipdb 加密小时文件)'
+    $storeFiles = Get-NwipdbFiles -DataDir $DataDir
     $tmpFiles = @()
     if (Test-Path $DataSubDir) { $tmpFiles = @(Get-ChildItem $DataSubDir -Filter '*.tmp' -File -ErrorAction SilentlyContinue) }
-    if ($dataFiles.Count -gt 0) { Pass 'DATA_FILE' ("{0} 个数据文件，最新 {1} ({2:N0} bytes)" -f $dataFiles.Count, $dataFiles[0].Name, $dataFiles[0].Length) }
-    else { Fail 'DATA_FILE' ("{0} 下没有 data\\*.json" -f $DataDir) }
+    if ($storeFiles.Count -gt 0) { Pass 'DATA_FILE' ("{0} 个加密小时文件，最新 {1} ({2:N0} bytes)" -f $storeFiles.Count, $storeFiles[$storeFiles.Count-1].Name, $storeFiles[$storeFiles.Count-1].Length) }
+    else { Fail 'DATA_FILE' ("{0} 下没有 data\*.nwipdb（v2.3.0 加密小时文件）" -f $DataDir) }
     if ($tmpFiles.Count -gt 0) { Fail 'DATA_ATOMIC' ("残留 {0} 个 .tmp 文件（原子写失败?）: {1}" -f $tmpFiles.Count, (($tmpFiles | Select-Object -First 3 | ForEach-Object { $_.Name }) -join ',')) }
     else { Pass 'DATA_ATOMIC' '无残留 .tmp 文件' }
-
-    $day = $null
-    if ($dataFiles.Count -gt 0) {
-        try { $day = Read-JsonFile $dataFiles[0].FullName; Pass 'DATA_JSON' ("JSON 可解析: " + $dataFiles[0].Name) }
-        catch { Fail 'DATA_JSON' ("JSON 解析失败: " + $_.Exception.Message) }
+    $keyInfo = Get-NwipdbKeyInfo -DataDir $DataDir
+    if ($keyInfo.Exists -and $keyInfo.Valid) { Pass 'DATA_STOREKEY' ("data\{0} 存在且 magic={1}（{2}B，DPAPI 保护）" -f $script:NwipdbFormat.KeyPathName, $keyInfo.Magic, $keyInfo.Length) }
+    else { Fail 'DATA_STOREKEY' ("未生成有效密钥文件 data\{0}（Exists={1} Magic={2}）" -f $script:NwipdbFormat.KeyPathName, $keyInfo.Exists, $keyInfo.Magic) }
+    $badHeaders = @()
+    foreach ($sf in $storeFiles) {
+        $hdrOne = Read-NwipdbHeader -Path $sf.FullName
+        if (-not $hdrOne.Ok) { $badHeaders += ($sf.Name + ': ' + $hdrOne.Error) }
     }
+    if ($storeFiles.Count -gt 0 -and $badHeaders.Count -eq 0) { Pass 'DATA_STORE_FORMAT' ("{0} 个 .nwipdb 明文头均有效（magic=NWIPDB01 / version=1 / 长度校验通过）" -f $storeFiles.Count) }
+    else { Fail 'DATA_STORE_FORMAT' ("坏头文件 {0}/{1}: {2}" -f $badHeaders.Count, $storeFiles.Count, (($badHeaders | Select-Object -First 3) -join '; ')) }
 
-    if ($day) {
-        $ips = $day['ips']; $procs = $day['procs']; $samples = $day['samples']
-        $ipCount = 0; $procCount = 0; $sampleListCount = 0
-        $sumIp = [double]0; $sumProc = [double]0
-        $maxConn = 0; $maxConnName = ''
-        $sumIpIn = [double]0; $sumIpOut = [double]0
-        $procNameEmpty = 0; $procPathEmpty = 0
-        if ($ips) {
-            $ipCount = $ips.Count
-            foreach ($k in $ips.Keys) {
-                $v = $ips[$k]
-                $sumIpIn += [double]$v['bytesIn']
-                $sumIpOut += [double]$v['bytesOut']
-                $sumIp += [double]$v['bytesIn'] + [double]$v['bytesOut']
-            }
-        }
-        if ($procs) {
-            $procCount = $procs.Count
-            foreach ($k in $procs.Keys) {
-                $v = $procs[$k]
-                $sumProc += [double]$v['bytesIn'] + [double]$v['bytesOut']
-                if ([int]$v['connCount'] -gt $maxConn) { $maxConn = [int]$v['connCount']; $maxConnName = $k }
-                $nm = [string]$v['name']; $pp = [string]$v['path']
-                if ([string]::IsNullOrWhiteSpace($nm)) { $procNameEmpty++ }
-                if ([string]::IsNullOrWhiteSpace($pp)) { $procPathEmpty++ }
-            }
-        }
-        if ($samples) { $sampleListCount = $samples.Count }
-        $rawSamples = 0
-        try { $rawSamples = [int]$day['sampleCount'] } catch { }
-        $dayIn = [double]$day['bytesIn']; $dayOut = [double]$day['bytesOut']
+    $todayData = Get-Date -Format 'yyyy-MM-dd'
+    $daySum = Get-DayMergedSummary -DataDir $DataDir -Date $todayData
+    if (-not $daySum.Ok) {
+        Fail 'DATA_DECRYPT' ("今天的加密小时文件解密/合并失败: {0}" -f $daySum.Error)
+    } else {
+        Pass 'DATA_DECRYPT' ("{0} 个今天小时文件解密合并成功（DPAPI+HMAC-SHA256+AES-256-CBC+GZip）" -f $daySum.Files)
+        $ipCount = $daySum.IpCount; $procCount = $daySum.ProcCount
+        $sampleListCount = $daySum.SamplesCount; $rawSamples = [int]$daySum.SampleCount
+        $dayIn = [double]$daySum.BytesIn; $dayOut = [double]$daySum.BytesOut
         $totalBytes = $dayIn + $dayOut
-        $precise = $false
-        try { $precise = [bool]$day['bytesPrecise'] } catch { }
+        $precise = [bool]$daySum.BytesPrecise
         $isAdmin = $script:SelftestAdmin
+        $sumIp = [double]0; $sumIpIn = [double]0; $sumIpOut = [double]0; $sumProc = [double]0
+        $maxConn = 0; $maxConnName = ''; $procNameEmpty = 0; $procPathEmpty = 0
+        if ($daySum.Merge -and $daySum.Merge.Ips) {
+            foreach ($k in $daySum.Merge.Ips.Keys) {
+                $v = $daySum.Merge.Ips[$k]
+                $sumIpIn += [double]$v.bytesIn
+                $sumIpOut += [double]$v.bytesOut
+                $sumIp += [double]$v.bytesIn + [double]$v.bytesOut
+            }
+        }
+        if ($daySum.Merge -and $daySum.Merge.Procs) {
+            foreach ($k in $daySum.Merge.Procs.Keys) {
+                $v = $daySum.Merge.Procs[$k]
+                $sumProc += [double]$v.bytesIn + [double]$v.bytesOut
+                if ([int]$v.connCount -gt $maxConn) { $maxConn = [int]$v.connCount; $maxConnName = $k }
+                if ([string]::IsNullOrWhiteSpace([string]$v.name)) { $procNameEmpty++ }
+                if ([string]::IsNullOrWhiteSpace([string]$v.path)) { $procPathEmpty++ }
+            }
+        }
 
-        Add-Info 'DATA_SUMMARY' ("date={0} 总字节={1:N0} (in {2:N0}/out {3:N0}) IP={4} 进程={5} 分钟桶={6} 原始采样={7} bytesPrecise={8}" -f $day['date'], $totalBytes, $dayIn, $dayOut, $ipCount, $procCount, $sampleListCount, $rawSamples, $precise)
+        Add-Info 'DATA_SUMMARY' ("date={0} 总字节={1:N0} (in {2:N0}/out {3:N0}) IP={4} 进程={5} 分钟桶={6} 原始采样={7} bytesPrecise={8} 文件={9}" -f $todayData, $totalBytes, $dayIn, $dayOut, $ipCount, $procCount, $sampleListCount, $rawSamples, $precise, $daySum.Files)
 
-        # 采样：2.0 是“每分钟一个桶”，45s 只有 1 个桶是正常的；多采样看 sampleCount
+        # 采样：v2.3.0 每采样实时写盘；分钟桶数来自解密合并后的 samples
         if ($rawSamples -ge 2 -or $sampleListCount -ge 2) { Pass 'DATA_SAMPLES' ("原始采样 sampleCount={0}，分钟桶 samples={1}（多采样已生效）" -f $rawSamples, $sampleListCount) }
         elseif ($sampleListCount -eq 1) { Warn 'DATA_SAMPLES' ("原始采样 sampleCount={0}，分钟桶 samples=1（观察时长/间隔偏短）" -f $rawSamples) }
         else { Fail 'DATA_SAMPLES' ("分钟桶 samples={0}，原始采样 sampleCount={1}" -f $sampleListCount, $rawSamples) }
@@ -943,27 +964,36 @@ try {
     }
 
     if ($mainHwnd -ne [IntPtr]::Zero) {
-        # 数据目录守卫：必须在 N 秒内看到 GUI 把预置的 data\*.json 重写（证明程序真的用了 --datadir），
-        # 而不是「只要文件存在就算过」。预置文件只在本脚本 %TEMP% 的 gui datadir 内，不涉及用户真实数据。
+        # v2.3.0 数据目录守卫：预置的 legacy .json 会被 GUI 启动时迁移为 legacy .nwipdb（并删除原 json），
+        # 同时新建本次启动的空小时文件并随后每采样写盘。三者任一未发生都说明 --datadir/存储链路异常。
+        $guiToday = Get-Date -Format 'yyyy-MM-dd'
         $waitDeadline = (Get-Date).AddSeconds($DataWaitSec)
-        $guiDataFiles = @()
-        $guiDataWritten = $false
+        $guiStoreFiles = @(); $guiLegacy = @(); $guiHour = @(); $guiWritten = $false
         while ((Get-Date) -lt $waitDeadline) {
-            $guiDataFiles = @(Get-DataFiles -Dir $GuiDataSubDir)
-            if ($guiDataFiles.Count -gt 0) {
-                foreach ($f in $guiDataFiles) {
-                    if ($f.FullName -ne $seedPath) { $guiDataWritten = $true; break }
-                    if ($f.LastWriteTimeUtc -gt $seedMtimeBefore) { $guiDataWritten = $true; break }
-                    try { if ((Get-Sha256 $f.FullName) -ne $seedHashBefore) { $guiDataWritten = $true; break } } catch { }
-                }
-            }
-            if ($guiDataWritten) { break }
+            $guiStoreFiles = Get-NwipdbFiles -DataDir $GuiDataDir
+            $guiLegacy = @($guiStoreFiles | Where-Object { $_.Kind -eq 'legacy' })
+            $guiHour = @($guiStoreFiles | Where-Object { $_.Kind -eq 'hour' -and $_.Date -eq $guiToday })
+            $hourWritten = $false
+            foreach ($hf in $guiHour) { if ($hf.LastWriteTimeUtc -gt $seedMtimeBefore) { $hourWritten = $true; break } }
+            if ($guiLegacy.Count -ge 1 -and $guiHour.Count -ge 1 -and $hourWritten) { $guiWritten = $true; break }
             if (-not (Get-Process -Id $guiPid -ErrorAction SilentlyContinue)) { break }
             Start-Sleep -Milliseconds 300
         }
-        if ($guiDataWritten) { Pass 'GUI_DATADIR' ("--datadir 生效：{0}s 内 GUI 已重写预置日文件（{1} 个数据文件，趋势页数据链可用）" -f $DataWaitSec, $guiDataFiles.Count) }
-        else {
-            Fail 'GUI_DATADIR' ("{0}s 内 GUI 未重写 {1} 下的数据文件（预置文件仍原样或不存在），怀疑程序未使用 --datadir 或未落盘；立即结束进程" -f $DataWaitSec, $GuiDataDir)
+        if ($guiWritten) {
+            $seedJsonGone = -not (Test-Path $seedPath)
+            if ($seedJsonGone) {
+                Pass 'GUI_DATADIR' ("--datadir 生效且迁移完成：{0}s 内生成 legacy 加密文件 {1} 个 + 本次加密小时文件 {2} 个（预置 json 已迁移删除，趋势页数据链可用）" -f $DataWaitSec, $guiLegacy.Count, $guiHour.Count)
+            } else {
+                Pass 'GUI_DATADIR' ("--datadir 生效：{0}s 内生成 legacy 加密文件 {1} 个 + 本次加密小时文件 {2} 个（采样已写盘）" -f $DataWaitSec, $guiLegacy.Count, $guiHour.Count)
+            }
+            $keyGui = Get-NwipdbKeyInfo -DataDir $GuiDataDir
+            if ($keyGui.Exists -and $keyGui.Valid) { Pass 'GUI_STOREKEY' ("GUI datadir 下 data\{0} 有效（{1}B）" -f $script:NwipdbFormat.KeyPathName, $keyGui.Length) }
+            else { Fail 'GUI_STOREKEY' ("GUI datadir 缺少有效密钥 data\{0}" -f $script:NwipdbFormat.KeyPathName) }
+            $seedMerged = Get-DayMergedSummary -DataDir $GuiDataDir -Date $guiToday
+            if ($seedMerged.Ok) { Add-Info 'GUI_SEED_MERGED' ("GUI 迁移+采样后按日合并：文件={0} 分钟桶={1} bytesIn={2:N0} — 趋势种子已在加密存储中" -f $seedMerged.Files, $seedMerged.SamplesCount, $seedMerged.BytesIn) }
+            else { Fail 'GUI_SEED_MERGED' ("GUI 数据解密合并失败: " + $seedMerged.Error) }
+        } else {
+            Fail 'GUI_DATADIR' ("{0}s 内未观察到「legacy 迁移文件 + 本次小时文件被采样写盘」（legacy={1} hour={2}）；怀疑程序未使用 --datadir 或加密存储未落盘；立即结束进程" -f $DataWaitSec, $guiLegacy.Count, $guiHour.Count)
             [void](Stop-QaProcess -ProcessId $guiPid)
             $mainHwnd = [IntPtr]::Zero
         }
@@ -1283,6 +1313,16 @@ try {
     else { Fail 'REALDATA_UNTOUCHED' ("用户真实数据目录被改动 {0} 处: {1}" -f $changes.Count, (($changes | Select-Object -First 8) -join '; ')) }
 
     if ($AuditRealData -and (Test-Path $RealDataDir)) {
+        # v2.3.0：真实数据可能已被迁移为 .nwipdb（发布安装时）；这里只读明文头（不解密、不写、不迁移）
+        $realStoreFiles = @(Get-NwipdbFiles -DataDir $RealDataDir)
+        if ($realStoreFiles.Count -gt 0) {
+            Add-Info 'AUDIT_REAL_STORE' ("真实 data\ 已为 v2.3.0 加密小时文件 {0} 个（只读头审计，不迁移/不解密）" -f $realStoreFiles.Count)
+            foreach ($rf in ($realStoreFiles | Select-Object -Last 3)) {
+                $h = Read-NwipdbHeader -Path $rf.FullName
+                if ($h.Ok) { Add-Info ("AUDIT_REAL_" + $rf.Date + "_" + $rf.Kind) ("明文头: bytesIn={0:N0} bytesOut={1:N0} sampleCount={2} ip={3} proc={4} flags={5}" -f $h.BytesIn, $h.BytesOut, $h.SampleCount, $h.IpCount, $h.ProcCount, $h.Flags) }
+                else { Add-Info ("AUDIT_REAL_" + $rf.Name) ("明文头解析失败: " + $h.Error) }
+            }
+        }
         $realFiles = @(Get-ChildItem (Join-Path $RealDataDir 'data') -Filter '*.json' -File -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
         foreach ($rf in ($realFiles | Select-Object -First 2)) {
             try {

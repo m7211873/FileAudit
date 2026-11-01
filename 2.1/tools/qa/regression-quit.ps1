@@ -3,6 +3,8 @@
 # "幽灵图标"（鼠标划过才消失）。--quit 让主实例走 ExitApp：保存数据、Dispose 托盘图标、正常退出。
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+# v2.3.0：.nwipdb 加密小时文件只读适配层（Q4 用解密合并确认已落盘）
+. (Join-Path $PSScriptRoot 'nwipdb-format.ps1')
 $exeSrc = Join-Path $repo 'bin\NetWatcher.exe'
 if (-not (Test-Path -LiteralPath $exeSrc)) { Write-Host "找不到 $exeSrc（先 cmd /c build.bat）"; exit 1 }
 $run = Join-Path $env:TEMP ('nw21-quit-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -34,12 +36,19 @@ $log = ''
 $logPath = Join-Path $d 'startup.log'
 if (Test-Path $logPath) { $log = Get-Content $logPath -Raw -Encoding UTF8 }
 Add-R 'Q3 退出走正常路径（startup.log 有 Application.Run 退出）' ($log -match 'Application\.Run 退出') ''
-$f = Join-Path $d ('data\' + (Get-Date).ToString('yyyy-MM-dd') + '.json')
+$today = (Get-Date).ToString('yyyy-MM-dd')
+$storeFiles = Get-NwipdbFiles -DataDir $d -Date $today
+$daySum = Get-DayMergedSummary -DataDir $d -Date $today
 $okData = $false; $detail = 'missing'
-if (Test-Path $f) {
-    try { $j = Get-Content $f -Raw -Encoding UTF8 | ConvertFrom-Json; $okData = $true; $detail = "sampleCount=$($j.sampleCount) bytesIn=$($j.bytesIn)" } catch { $detail = 'json parse fail' }
+if ($storeFiles.Count -ge 1 -and $daySum.Ok) {
+    $okData = $true
+    $detail = ("文件={0} sampleCount={1} bytesIn={2} 分钟桶={3}" -f $storeFiles.Count, $daySum.SampleCount, $daySum.BytesIn, $daySum.SamplesCount)
+} elseif ($storeFiles.Count -ge 1) {
+    $detail = ("有 {0} 个 .nwipdb 但解密合并失败: {1}" -f $storeFiles.Count, $daySum.Error)
+} else {
+    $detail = ("data\ 下无今天的 .nwipdb（{0}）" -f $d)
 }
-Add-R 'Q4 退出前数据已落盘且 JSON 可解析' $okData $detail
+Add-R 'Q4 退出前数据已落盘且加密小时文件可解密' $okData $detail
 Add-R 'Q5 无 ui-error/crash 日志' ((-not (Test-Path (Join-Path $d 'ui-error.log'))) -and (-not (Test-Path (Join-Path $d 'crash.log')))) ''
 Start-Sleep -Seconds 1
 $left = @(Get-CimInstance Win32_Process -Filter "Name='NetWatcher.exe'" | Where-Object { $_.ExecutablePath -eq $exe })

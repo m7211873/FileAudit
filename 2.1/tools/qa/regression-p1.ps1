@@ -45,6 +45,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 # JavaScriptSerializer 来自 System.Web.Extensions（解析 data\*.json）
 Add-Type -AssemblyName System.Web.Extensions | Out-Null
+# v2.3.0：.nwipdb 加密小时文件只读适配层（迁移后按日合并/解密读取）
+. (Join-Path $PSScriptRoot 'nwipdb-format.ps1')
 
 # ------------------------------------------------------------------ 路径与运行参数
 $RunTag = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -202,11 +204,9 @@ function Wait-GuiStarted {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
         if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return $false }
-        $d = Join-Path $DataDir 'data'
-        if (Test-Path $d) {
-            $f = @(Get-ChildItem $d -Filter '*.json' -File -ErrorAction SilentlyContinue)
-            if ($f.Count -gt 0) { return $true }
-        }
+        # v2.3.0：启动即创建本次会话的空加密小时文件（.nwipdb），不再写日 json
+        $storeFiles = @(Get-NwipdbFiles -DataDir $DataDir)
+        if ($storeFiles.Count -gt 0) { return $true }
         Start-Sleep -Milliseconds 300
     }
     return $false
@@ -509,11 +509,19 @@ try {
             elseif ($r7.ExitCode -eq 0) { Pass 'R7_DAEMON_EXIT' ("退出码=0 elapsed={0}s" -f $r7.ElapsedSec) }
             else { Fail 'R7_DAEMON_EXIT' ("退出码={0}（期望 0）" -f $r7.ExitCode) }
 
-            $after7 = Read-DaySummary (Get-NewestDayFile $DataR7)
-            if (-not $after7 -or -not $after7.ParseOk) {
-                Fail 'R7_DOWNGRADED' ("daemon 后 data\*.json 缺失/不可解析: {0}" -f $(if ($after7) { $after7.Error } else { '无文件' }))
+            # v2.3.0：daemon 启动时把旧明文 json 迁移为 legacy 加密小时文件；之后按日合并解密读取
+            $r7Legacy = Get-NwipdbFiles -DataDir $DataR7 -Kind legacy
+            $r7JsonLeft = @(Get-ChildItem (Join-Path $DataR7 'data') -Filter '*.json' -File -ErrorAction SilentlyContinue)
+            if ($r7Legacy.Count -ge 1) { Pass 'R7_MIGRATED' ("旧 json 已迁移为 legacy 加密文件: {0}" -f (($r7Legacy | ForEach-Object { $_.Name }) -join ',')) }
+            else { Fail 'R7_MIGRATED' '未生成 legacy .nwipdb（v2.3.0 迁移未发生）' }
+            if ($r7JsonLeft.Count -eq 0) { Add-Info 'R7_JSON_REMOVED' '原明文 json 已删除（迁移校验通过）' }
+            else { Fail 'R7_JSON_REMOVED' ("迁移后仍有明文 json: {0}" -f (($r7JsonLeft | ForEach-Object { $_.Name }) -join ',')) }
+
+            $after7 = Get-DayMergedSummary -DataDir $DataR7 -Date $Today
+            if (-not $after7.Ok) {
+                Fail 'R7_DOWNGRADED' ("daemon 后加密小时数据合并失败: {0}" -f $after7.Error)
             } else {
-                Add-Info 'R7_AFTER' ("bytesPrecise={0} bytesIn={1:N0} bytesOut={2:N0} sampleCount={3} date={4}" -f $after7.BytesPrecise, $after7.BytesIn, $after7.BytesOut, $after7.SampleCount, $after7.Date)
+                Add-Info 'R7_AFTER' ("bytesPrecise={0} bytesIn={1:N0} bytesOut={2:N0} sampleCount={3} 文件={4} 分钟桶={5}" -f $after7.BytesPrecise, $after7.BytesIn, $after7.BytesOut, $after7.SampleCount, $after7.Files, $after7.SamplesCount)
                 if (-not $after7.BytesPrecise) { Pass 'R7_DOWNGRADED' 'bytesPrecise 已从 true 降级为 false（1.0 假精确不再显示）' }
                 else { Fail 'R7_DOWNGRADED' 'bytesPrecise 仍为 true（假精确未降级）' }
                 if ($after7.SampleCount -gt 10) { Pass 'R7_SAMPLE_ACCUM' ("sampleCount {0} -> {1}（>10，未重置）" -f $before7.SampleCount, $after7.SampleCount) }
@@ -523,8 +531,8 @@ try {
                 } else {
                     Fail 'R7_BYTES_NO_REGRESS' ("bytes 回退：in {0:N0} -> {1:N0}，out {2:N0} -> {3:N0}" -f $before7.BytesIn, $after7.BytesIn, $before7.BytesOut, $after7.BytesOut)
                 }
-                if ($after7.Date -eq $Today) { Pass 'R7_DATE' ("date={0}" -f $after7.Date) }
-                else { Fail 'R7_DATE' ("date={0}（期望 {1}）" -f $after7.Date, $Today) }
+                if ($after7.Files -ge 1) { Pass 'R7_DATE' ("今天加密小时文件 {0} 个（合并可读）" -f $after7.Files) }
+                else { Fail 'R7_DATE' ("今天无可用小时文件（合并文件数={0}）" -f $after7.Files) }
             }
         } catch {
             Fail 'R7_UNEXPECTED' ("异常: " + $_.Exception.Message + " @ line " + $_.InvocationInfo.ScriptLineNumber)
@@ -633,8 +641,9 @@ try {
                 else { Fail 'R10_GUI_A_ALIVE' ("GUI A pid={0} 已退出（不应被 B 影响）" -f $guiA) }
                 $aliveB = [bool](Get-Process -Id $guiB -ErrorAction SilentlyContinue)
                 Add-Info 'R10_GUI_B_STATE' ("GUI B 提示框显示期间存活={0}" -f $aliveB)
-                $dataA = Read-DaySummary (Get-NewestDayFile $DataR10)
-                if ($dataA -and $dataA.ParseOk) { Add-Info 'R10_GUI_A_DATA' ("样本={0} bytesIn={1:N0} bytesOut={2:N0}" -f $dataA.SampleCount, $dataA.BytesIn, $dataA.BytesOut) }
+                $sumA = Get-DayMergedSummary -DataDir $DataR10 -Date $Today
+                if ($sumA.Ok) { Add-Info 'R10_GUI_A_DATA' ("加密小时文件={0} 样本={1} bytesIn={2:N0} bytesOut={3:N0}" -f $sumA.Files, $sumA.SampleCount, $sumA.BytesIn, $sumA.BytesOut) }
+                else { Add-Info 'R10_GUI_A_DATA' ("GUI A 数据合并失败: " + $sumA.Error) }
             }
         } catch {
             Fail 'R10_UNEXPECTED' ("异常: " + $_.Exception.Message + " @ line " + $_.InvocationInfo.ScriptLineNumber)
