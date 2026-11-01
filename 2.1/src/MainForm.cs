@@ -77,9 +77,9 @@ namespace NetWatcher
         // ---------------- 进程视图 ----------------
         Label lblProcSummary;
         TreeView treeProcs;
-        bool procTreeBuilt = false;
-        bool procTreeExpandAllPending = false;
-        HashSet<string> procTreeExpandedPending = new HashSet<string>();
+        // 2.2.1：进程树刷新状态保持——用稳定的节点 Name 作 key（不掺动态字节数文本），
+        // 首次构建/新节点默认折叠；刷新时只恢复用户展开过的节点，并恢复选中与滚动位置。
+        HashSet<string> procTreeExpandedKeys = new HashSet<string>();
 
         // ---------------- 按日统计 ----------------
         Label lblDateSummary;
@@ -2132,6 +2132,8 @@ namespace NetWatcher
 
             HashSet<string> expanded = new HashSet<string>();
             CollectExpanded(treeProcs.Nodes, expanded);
+            string selectedKey = treeProcs.SelectedNode != null ? treeProcs.SelectedNode.Name : "";
+            string topKey = treeProcs.TopNode != null ? treeProcs.TopNode.Name : "";
 
             HashSet<string> ipSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             long connTotal = 0;
@@ -2158,6 +2160,7 @@ namespace NetWatcher
                     }
 
                     TreeNode nodeName = treeProcs.Nodes.Add(nm + "   (" + plist.Count + " 个 PID)   ↓" + FmtBytes(nIn) + "   ↑" + FmtBytes(nOut) + "   · " + nConn + " 次");
+                    nodeName.Name = ProcNodeKey(nm);
                     nodeName.ForeColor = Color.FromArgb(24, 58, 110);
 
                     plist.Sort(delegate(ProcAgg a, ProcAgg b)
@@ -2168,6 +2171,7 @@ namespace NetWatcher
                     foreach (ProcAgg p in plist)
                     {
                         TreeNode nodePid = nodeName.Nodes.Add("PID " + p.pid + "   ↓" + FmtBytes(p.bytesIn) + "   ↑" + FmtBytes(p.bytesOut) + "   · " + p.connCount + " 次");
+                        nodePid.Name = ProcPidKey(nm, p.pid);
 
                         List<IpConnAgg> iplist = new List<IpConnAgg>();
                         if (p.ips != null)
@@ -2198,6 +2202,7 @@ namespace NetWatcher
                             string text = ia.ip + ":" + (ports.Length == 0 ? "?" : ports) + "   [" + proto + "]   " + loc
                                 + "   ↓" + FmtBytes(ia.bytesIn) + "   ↑" + FmtBytes(ia.bytesOut) + "   · " + ia.connCount + " 次";
                             TreeNode nodeIp = nodePid.Nodes.Add(text);
+                            nodeIp.Name = ProcIpKey(nm, p.pid, ia.ip);
                             nodeIp.Tag = ia.ip;
                             nodeIp.ForeColor = Color.FromArgb(40, 40, 40);
                         }
@@ -2209,11 +2214,20 @@ namespace NetWatcher
                 treeProcs.EndUpdate();
             }
 
-            // 展开状态需在 TreeView 句柄可用时应用（隐藏页时 Expand 会被忽略）
-            procTreeExpandAllPending = !procTreeBuilt || expanded.Count == 0;
-            procTreeExpandedPending = expanded;
-            procTreeBuilt = true;
-            ApplyTreeExpansion();
+            // 2.2.1：刷新后默认全部折叠（最小状态），只恢复用户展开过的节点；选中与滚动位置一并恢复。
+            // 隐藏页时 Expand/SelectedNode 可能不生效，由 HandleCreated/VisibleChanged 里的 ApplyTreeExpansion 兜底。
+            procTreeExpandedKeys = expanded;
+            treeProcs.BeginUpdate();
+            try
+            {
+                treeProcs.CollapseAll();
+                ApplyTreeExpansionCore();
+                RestoreTreeSelection(selectedKey, topKey);
+            }
+            finally
+            {
+                treeProcs.EndUpdate();
+            }
 
             DayData sum = dd ?? new DayData { date = date };
             long total = sum.bytesIn + sum.bytesOut;
@@ -2249,11 +2263,28 @@ namespace NetWatcher
             return t;
         }
 
+        // 2.2.1：节点 key 只由稳定业务字段组成（进程名 / PID / IP），不掺动态字节数文本，
+        // 这样每次刷新重建节点后仍能匹配到"同一个节点"，展开/选中状态才不会丢。
+        static string ProcNodeKey(string name)
+        {
+            return "N|" + (name ?? "");
+        }
+
+        static string ProcPidKey(string name, int pid)
+        {
+            return "N|" + (name ?? "") + "|P|" + pid;
+        }
+
+        static string ProcIpKey(string name, int pid, string ip)
+        {
+            return "N|" + (name ?? "") + "|P|" + pid + "|I|" + (ip ?? "");
+        }
+
         static void CollectExpanded(TreeNodeCollection nodes, HashSet<string> set)
         {
             foreach (TreeNode n in nodes)
             {
-                if (n.IsExpanded) set.Add(n.FullPath);
+                if (n.IsExpanded && !string.IsNullOrEmpty(n.Name)) set.Add(n.Name);
                 CollectExpanded(n.Nodes, set);
             }
         }
@@ -2264,15 +2295,7 @@ namespace NetWatcher
             treeProcs.BeginUpdate();
             try
             {
-                if (procTreeExpandAllPending)
-                {
-                    treeProcs.ExpandAll();
-                    procTreeExpandAllPending = false;
-                }
-                else
-                {
-                    ExpandSavedNodes(treeProcs.Nodes);
-                }
+                ApplyTreeExpansionCore();
             }
             catch { }
             finally
@@ -2281,17 +2304,61 @@ namespace NetWatcher
             }
         }
 
+        // 只展开"用户展开过的"节点；其余（包括首次构建、新出现的节点）保持折叠。
+        void ApplyTreeExpansionCore()
+        {
+            ExpandSavedNodes(treeProcs.Nodes);
+        }
+
         void ExpandSavedNodes(TreeNodeCollection nodes)
         {
             foreach (TreeNode n in nodes)
             {
-                if (procTreeExpandedPending.Contains(n.FullPath))
+                if (!string.IsNullOrEmpty(n.Name) && procTreeExpandedKeys.Contains(n.Name))
                 {
                     try { n.Expand(); }
                     catch { }
                 }
                 ExpandSavedNodes(n.Nodes);
             }
+        }
+
+        // 刷新后恢复选中行与滚动位置；选中节点若已被折叠不可见，则不强行展开父节点。
+        void RestoreTreeSelection(string selectedKey, string topKey)
+        {
+            if (treeProcs == null) return;
+            try
+            {
+                TreeNode sel = string.IsNullOrEmpty(selectedKey) ? null : FindTreeNodeByKey(treeProcs.Nodes, selectedKey);
+                if (sel != null && IsTreeNodeVisible(sel)) treeProcs.SelectedNode = sel;
+                else treeProcs.SelectedNode = null;
+
+                TreeNode top = string.IsNullOrEmpty(topKey) ? null : FindTreeNodeByKey(treeProcs.Nodes, topKey);
+                if (top != null && IsTreeNodeVisible(top)) treeProcs.TopNode = top;
+            }
+            catch { }
+        }
+
+        static TreeNode FindTreeNodeByKey(TreeNodeCollection nodes, string key)
+        {
+            foreach (TreeNode n in nodes)
+            {
+                if (n.Name == key) return n;
+                TreeNode found = FindTreeNodeByKey(n.Nodes, key);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        static bool IsTreeNodeVisible(TreeNode node)
+        {
+            TreeNode p = node.Parent;
+            while (p != null)
+            {
+                if (!p.IsExpanded) return false;
+                p = p.Parent;
+            }
+            return true;
         }
 
         // =============================================================
