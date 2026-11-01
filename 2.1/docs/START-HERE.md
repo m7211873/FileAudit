@@ -1,8 +1,8 @@
 # START HERE · IP监控2.1 项目起点（给下一个智能体/接手者）
 
 > 归档时间：2026-10-31（北京时间）。**先读完这一页再动手**，可以省掉几小时试错。
-> 当前版本：**2.2.1 定版（2.2.1.0，2026-11-01）**；2.1 是 2.0.2 的迭代修复版，代码/脚本/文档在 `2.1/` 子目录。
-> 2.2.1 已发布：tag `v2.2.1`（GitHub Release 附件 `NetWatcher-2.2.1-release.zip`；发布提交号见 tag）；2.0 基线：Gitee `main` = `b7b3720`（2.0.2，冻结，不再改）。
+> 当前版本：**2.3.0 定版（2.3.0.0，2026-11-01）**；2.1 是 2.0.2 的迭代修复版，代码/脚本/文档在 `2.1/` 子目录。
+> 2.3.0 已发布：tag `v2.3.0`（GitHub Release 附件 `NetWatcher-2.3.0-release.zip`；发布提交号见 tag）；2.0 基线：Gitee `main` = `b7b3720`（2.0.2，冻结，不再改）。
 
 ---
 
@@ -28,11 +28,11 @@
 ```powershell
 cd D:\IP监控2.1版\NetWatcher\2.1
 
-# 1) 编译（产出 2.1\bin\NetWatcher.exe，版本资源 2.2.1.0）
+# 1) 编译（产出 2.1\bin\NetWatcher.exe，版本资源 2.3.0.0；build.bat 已引 System.Security.dll 供 DPAPI）
 cmd /c build.bat
 # 期望：[OK] bin\NetWatcher.exe built.（0 error / 0 warning）
 
-# 2) P0 回归（期望 30/30 PASS；2.2.0 最终数字见 §8）
+# 2) P0 回归（期望 30/30 PASS；2.3.0 最终数字见 §8）
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\regression-p0.ps1
 
 # 3) P1 回归（期望 38/38 PASS；R9 接受 2.x.y）
@@ -42,12 +42,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\regression-p1.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\regression-activation.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\regression-quit.ps1
 
+# 3c) v2.3.0 存储专项（QA 写域脚本，如已存在）：.nwipdb 格式/迁移/加密
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\regression-v230.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\nwipdb-format.ps1
+
 # 4) 无界面整体验收
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\verify.ps1 -SkipGui -Seconds 30
-# 期望：产品检查全 PASS（2.2.0 最终数字见 §8；环境类 FAIL 需给出对照组归因，见 §5）
+# 期望：产品检查全 PASS（2.3.0 最终数字见 §8；环境类 FAIL 需给出对照组归因，见 §5）
 
 # 5) 5 标签 GUI 冒烟（含趋势页/日期行/筛选；用独立 mutex-tag 与 %TEMP% datadir）
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\verify.ps1 -Seconds 20 -MutexTag v220-final
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\verify.ps1 -Seconds 20 -MutexTag v230-final
 ```
 
 > **任何测试/截图/自检都必须带绝对 `--datadir <临时目录>`**，绝不写用户真实数据目录
@@ -61,20 +65,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\verify.ps1 -Seconds
 2. **`docs/踩坑与决策记录.md`** —— 症状→根因→处理→证据 + ADR 决策表；**§八 是 2.1 新增的坑**
 3. **`docs/design-2.1.md`** —— 2.1 设计契约（已实现：数据模型/API/UI/单写锁/selftest/与 2.0 差异）
 4. **`docs/开发与维护指南.md`** —— 代码地图、启动顺序、数据模型、构建/签名/验收、扩展点
-5. `README.md`（功能与限制总览）、`CHANGELOG.md`（[2.2.1] 进程视图刷新保持展开/选中、[2.2.0] 智能日期行/活动筛选/趋势页、[2.1.1] 托盘修复/--quit、[2.1.0] 定版）
-6. 改 UI 时看 `docs/用户手册.md`（含截图与文案对照；截图为 2.2.0 真机图）
+5. `README.md`（功能与限制总览）、`CHANGELOG.md`（[2.3.0] 加密小时文件存储、[2.2.1] 进程视图刷新保持展开/选中、[2.2.0] 智能日期行/活动筛选/趋势页、[2.1.1] 托盘修复/--quit、[2.1.0] 定版）
+6. 改 UI 时看 `docs/用户手册.md`（含截图与文案对照；截图为 2.2.0 真机图）；**改存储/数据看 `docs/design-2.1.md` §13 与用户手册 5.4（数据文件与加密）**
 
 ---
 
 ## 3. 一句话现状
 
-IP监控2.1 **已定版（2.2.1）**：2.0 的能力（单 exe、五标签页（2.2.0 新增趋势）、按日原子落盘、诚实降级、托盘自启）全部保留；
-2.1.0 的 P0/P1、2.1.1 托盘修复、2.2.0 的日期行/活动筛选/趋势页、2.2.1 的进程视图刷新状态保持全部落地并冻结。
-2.2.1 回归 6 套件 **164 项全 PASS（0 FAIL / 0 WARN）**：p0 30/30、p1 38/38（R9=2.2.1.0）、activation 9/9、quit 6/6、headless 29/29、5 标签 GUI 52/52（`_analysis\v221-验收\01-回归.md`）；签名 exe **135,056 B / 2.2.1.0 / `Valid` / SHA256 `DE0A2B20…`**；真机 UI 手测 **PASS=40 / FAIL=0 / WARN=0**（默认全折叠 / 展开+选中跨刷新保持 / 全折叠不自动展开 / 切页保持 / 新节点折叠）。2.2.0 历史验证见 §8。
-版本 2.2.1.0、标题 `IP监控2.1`、用 2.0 同一张证书签名（发布前重签，Authenticode `Valid`）。
+IP监控2.1 **已定版（2.3.0）**：2.0 的能力（单 exe、五标签页（2.2.0 新增趋势）、诚实降级、托盘自启）全部保留；
+2.1.0 的 P0/P1、2.1.1 托盘修复、2.2.0 的日期行/活动筛选/趋势页、2.2.1 的进程视图刷新状态保持、2.3.0 的**加密小时文件存储**全部落地并冻结。
+2.3.0 存储：数据改为加密小时文件 `.nwipdb`（每小时一个/每次启动新建/每采样实时落盘/DPAPI+AES+HMAC+GZip），旧按日 JSON 首次启动迁移为 legacy 加密文件并删除明文；**迁移不可逆、回退 2.2.x 读不到新格式、升级前必须备份 data**。
+2.3.0 回归 **7 套件 208 项全 PASS（0 FAIL / 0 WARN / 0 TODO）**（p0 32/32、p1 39/39、activation 9/9、quit 6/6、headless 35/35、GUI 59/59、H1–H7 28/28；`_analysis\v230-验收\02-回归.md`）；签名 exe **153,488 B / 2.3.0.0 / `Valid` / SHA256 `E129A678…`**；真机 UI 验证 **PASS=109 / FAIL=0 / WARN=0**（迁移 15ms / 历史 610.78·811.90MB 0% 误差 / 每次启动新增小时文件 / 加密无明文 / 损坏·错 key 不崩溃 / 30 天性能 0·1·20·36ms / 5 标签 / 真实数据零改动；未实机：真实跨整点·跨日、断电、换机不可读，见 §8 报告）。2.2.1 历史验证见 §8。
+版本 2.3.0.0、标题 `IP监控2.1`、用 2.0 同一张证书签名（发布前重签，Authenticode `Valid`）。
 **唯一能力缺口仍是"逐 IP 精确流量"**（依赖 Windows `GetPerTcpConnectionEStats`，开发机实测不可用，
 程序诚实降级为「估算」并标注，不会谎报精确；精确只覆盖 IPv4 TCP，IPv6/UDP 只计总流量）。
-**交付动作**：2.1.x/2.2.0 的安装与发布已完成；**2.2.1 已定版发布**（tag `v2.2.1`；GitHub Release 附件 `NetWatcher-2.2.1-release.zip`），发布包真机升级安装后冒烟通过。
+**交付动作**：2.1.x/2.2.0/2.2.1 的安装与发布已完成；**2.3.0 已定版发布**（tag `v2.3.0`；GitHub Release 附件 `NetWatcher-2.3.0-release.zip`），发布包真机升级安装后冒烟通过。
 
 ---
 
@@ -116,6 +121,8 @@ IP监控2.1 **已定版（2.2.1）**：2.0 的能力（单 exe、五标签页（
 - **第三方 HIPS（火绒等）**：即使签名也可能提示，需在安全软件里加信任区。
 - **环境类 FAIL 需按对照组归因**：如 `SELFTEST_GEOIP`（ip-api.com 间歇不可达）、`REALDATA_UNTOUCHED`
   （用户 2.0 实例实时写真实目录）；证据与对照组见 §8，不是产品缺陷，**不要改判/削弱守卫**。
+- **2.3.0 存储限制（如实记录）**：迁移不可逆（回退 2.2.x 读不到新格式，升级前必须备份 `data`）；加密文件仅本机本用户可读（换机/换用户不可解密，无明文备份）；
+  跨整点/跨日未实机触发（注入时钟/静态覆盖）；每采样全量重写当前小时文件（真实数据构造单次 ~19.2ms，1s 高频建议后续改增量）；同秒两次启动会覆盖同名空小时文件（影响可忽略）。
 
 ---
 
@@ -124,10 +131,11 @@ IP监控2.1 **已定版（2.2.1）**：2.0 的能力（单 exe、五标签页（
 1. ~~真机安装/卸载验证~~ **已完成**（2026-10-31；含真实数据续接、uninstall 保留数据、重装验证）。
 2. ~~2.2.0 日期行/活动筛选/趋势页~~ **已完成并定版**（含收口修复：样本归一化/断点/Y 轴/悬停/筛选语义/布局）。
 3. ~~2.2.1 进程视图刷新保持展开/选中~~ **已完成并定版**（稳定 key、默认全部折叠、恢复展开/选中/滚动、切页保持）。
-4. ~~重截真机截图~~ **已完成**（`docs/screenshots/` 为 2.2.0 真机截图；2.2.1 界面一致）。
-5. **P2 体验项**：列宽记忆、CSV 导出范围选择、MainForm 拆 partial。
-6. **长期**：ETW 逐 IP/逐进程统计（覆盖 UDP/QUIC）；对外分发签名（SignPath / Certum）。
-7. **可选**：150% DPI / 真实午夜跨日的补充验证。
+4. ~~2.3.0 加密小时文件存储~~ **已完成并定版**（`.nwipdb` 加密小时文件/每次启动新建/每采样实时落盘/DPAPI+AES+HMAC+GZip/旧 JSON 迁移删明文/历史概览多小时去重）。
+5. ~~重截真机截图~~ **已完成**（`docs/screenshots/` 为 2.2.0 真机截图；2.2.1/2.3.0 界面一致）。
+6. **P2 体验项**：列宽记忆、CSV 导出范围选择、MainForm 拆 partial；1s 高频采样可考虑增量落盘（缓解写放大）。
+7. **长期**：ETW 逐 IP/逐进程统计（覆盖 UDP/QUIC）；对外分发签名（SignPath / Certum）。
+8. **可选**：150% DPI / 真实午夜跨日、真实跨整点（注入时钟）的补充验证。
 
 ---
 
@@ -136,19 +144,18 @@ IP监控2.1 **已定版（2.2.1）**：2.0 的能力（单 exe、五标签页（
 ```
 NetWatcher/                     # Gitee 仓库根（2.0 冻结）
 ├── src/ docs/ bin/ ...         # 2.0（不许改）
-└── 2.1/                        # 本版：IP监控2.1（2.2.1 定版）
-    ├── src/                    9 个 C# 源文件 + AssemblyInfo.cs（2.2.1.0）
+└── 2.1/                        # 本版：IP监控2.1（2.3.0 定版）
+    ├── src/                    9 个 C# 源文件 + AssemblyInfo.cs（2.3.0.0）；Storage.cs=加密小时文件存储
     ├── bin/NetWatcher.exe      产物（已编译 + 用 2.0 证书签名）
-    ├── build.bat / build-and-sign.bat
+    ├── build.bat / build-and-sign.bat   （build.bat 引 System.Security.dll 供 DPAPI）
     ├── install.ps1 / uninstall.ps1   （2.1 化：只动 NetWatcher2.1 的目录/Run 值/快捷方式）
     ├── README.md / CHANGELOG.md
-    ├── docs/                   START-HERE / design-2.1 / 用户手册 / 开发与维护指南 /
-    │                           踩坑与决策记录 / 2.1-交接说明 / design-2.0（历史）/ screenshots
-    └── tools/                  sign（自签名，复用 2.0 证书）/ qa（verify.ps1 + regression-p0/p1.ps1）/ fix-smartscreen.ps1
+    ├── docs/                   START-HERE / design-2.1（§13 存储与加密）/ 用户手册（5.4 数据文件与加密）/
+    │                           开发与维护指南 / 踩坑与决策记录 / 2.1-交接说明 / design-2.0（历史）/ screenshots
+    └── tools/                  sign（自签名，复用 2.0 证书）/ qa（verify + regression-p0/p1/activation/quit + nwipdb-format/regression-v230）/ fix-smartscreen.ps1
 ```
 
-数据目录（2.0/2.1 共用）：`%APPDATA%\NetWatcher\`——`data\YYYY-MM-DD.json`、`geocache.json`、`config.json`、
-`startup.log`、`crash.log`、`ui-error.log`、`monitor.log`、`selftest.log`、`daemon.log`。
+数据目录（2.0/2.1 共用）：`%APPDATA%\NetWatcher\`——**2.3.0 起 `data\` 为加密小时文件** `监控_<日期>_<小时>_s<启动>.nwipdb`（每小时一个/每次启动新建）+ 旧 JSON 迁移的 `…_legacy000000.nwipdb` + `.storekey` 密钥；另有 `geocache.json`、`config.json`、`startup.log`、`crash.log`、`ui-error.log`、`monitor.log`、`selftest.log`、`daemon.log`。
 
 2.1 安装位置：`%LOCALAPPDATA%\Programs\NetWatcher2.1`；Run 值名 `NetWatcher2.1`；快捷方式 `IP监控2.1.lnk`。
 
@@ -156,7 +163,16 @@ NetWatcher/                     # Gitee 仓库根（2.0 冻结）
 
 ## 8. 验收证据（可复核）
 
-**2.2.1 最终验收（待 QA/UI 报告落盘后回填）**
+**2.3.0 最终验收（待 QA/UI 回填）**
+
+| 证据 | 位置 |
+|---|---|
+| 2.3.0 回归 **7 套件 208 项全 PASS（0 FAIL / 0 WARN / 0 TODO）**：p0 32/32（`20261101-181838`）、p1 39/39（`20261101-182356`，R9=2.3.0.0）、activation 9/9、quit 6/6、headless 35/35（`20261101-182441`）、GUI 59/59（`20261101-182539`）、H1–H7 28/28（`20261101-183214`；H7 24 文件合并 21ms/30 天首载 30ms） | `_analysis\v230-验收\02-回归.md`（原始报告 `2.1\tools\qa\out\`） |
+| 2.3.0 真机 UI 验证 **PASS=109 / FAIL=0 / WARN=0**（迁移 15ms / 历史 610.78·811.90MB 0% 误差 / 每次启动新增小时文件 / 加密无明文 / 损坏·错 key 不崩溃 / 30 天性能 0·1·20·36ms / 5 标签 / 真实数据零改动；未实机：跨整点·跨日、断电、换机不可读） | `_analysis\v230-验收\03-真机验证.md`（8 张截图人工复核） |
+| 实现自测（dev，fixtures 真实数据副本）：迁移+重启+合并 **17/17 PASS**；24 文件合并 **21~22ms**、30 天历史首载 **~29ms**、单次 SaveHour **19.2ms**；`--selftest` 真实 data 未改写 | `_analysis\v230-验收\01-实现说明.md` |
+| 签名（**153,488 B / 2.3.0.0 / Authenticode `Valid` / SHA256 `E129A678…`**，`CN=NSYBdeDFY NetWatcher`） | 发布记录、`tools\sign\verify-sign.ps1` |
+
+**2.2.1 最终验收（历史，定版）**
 
 | 证据 | 位置 |
 |---|---|
@@ -209,3 +225,7 @@ NetWatcher/                     # Gitee 仓库根（2.0 冻结）
 | tag `v2.2.0` | 2.2.0 定版发布：合并 `feature/2.2.0` → `main`、推送 Gitee + GitHub、GitHub Release（发布提交号见 tag） |
 | `6dffea3` | **2.2.1**：进程视图刷新保持展开/选中状态，默认全部折叠（2.2.1 定版代码基线） |
 | tag `v2.2.1` | 2.2.1 定版发布：合并 `fix/2.2.1` → `main`、推送 Gitee + GitHub、GitHub Release（发布提交号见 tag） |
+| `2f72bad` | **2.3.0**：加密小时文件存储 `.nwipdb`（DPAPI+AES-256-CBC+HMAC+GZip、明文头、`.storekey`、原子写、旧 JSON 迁移） |
+| `06afc1e` | 2.3.0：Monitor 当天/小时双聚合 + 每采样实时加密落盘 + selftest 加密/迁移/性能 + `build.bat` 引 `System.Security` |
+| `d634622` | 2.3.0 收口：历史概览多小时 IP/进程数去重；版本升 2.3.0.0（2.3.0 定版代码基线） |
+| tag `v2.3.0` | 2.3.0 定版发布：合并 `feat/2.3.0` → `main`、推送 Gitee + GitHub、GitHub Release（发布提交号见 tag） |

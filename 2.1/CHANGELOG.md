@@ -4,7 +4,60 @@
 格式参考 Keep a Changelog；日期为本机验证日期（2026-11-01，北京时间）。
 
 > **分支说明**：2.0.x 的历史记录是 Gitee 仓库根目录（`NetWatcher/`）的冻结交付。
-> 2.1 从 2.0.2 复制出独立文件夹 `2.1/`，版本号统一 **2.1.x → 2.2.1**（当前 **2.2.1 定版**）；本文件位于 `2.1/` 内，记录 2.1/2.2 的变更。
+> 2.1 从 2.0.2 复制出独立文件夹 `2.1/`，版本号统一 **2.1.x → 2.3.0**（当前 **2.3.0 定版**）；本文件位于 `2.1/` 内，记录 2.1/2.2/2.3 的变更。
+
+---
+
+## [2.3.0] - 2026-11-01（加密小时文件存储）
+
+> **状态：定版（2.3.0.0）。** 存储层重构：数据从"按日明文 JSON"改为**加密小时文件 `.nwipdb`**——按小时落盘、每次启动新建文件、
+> 每个采样周期实时落盘、DPAPI+AES+HMAC+GZip 加密、明文头仅元数据；旧按日 JSON 在首次启动时迁移为加密 legacy 文件并**删除明文**。
+
+### 新增 / 变更（存储与加密）
+- **文件命名与位置**：`%APPDATA%\NetWatcher\data\监控_<yyyy-MM-dd>_<HH-00-00>_s<HHmmss>.nwipdb`（后缀 `.nwipdb`）；小时起点用本地整点、`s` 为本次启动时分秒。
+  **每小时一个文件**、**每次程序启动新建一个空小时文件**；同一天多次启动/跨整点会产生多个文件，按日期查看时自动合并。旧数据迁移文件：`监控_<date>_00-00-00_legacy000000.nwipdb`。
+- **每小时内容**：该小时聚合（`DayData` 同构 + `hourStartUnix`/`sessionStartUnix`）：总字节/峰值/采样数、分钟桶 `samples`、IP 聚合、进程聚合。
+- **加密格式**（`.nwipdb`，little-endian）：明文头 **76B** = `magic "NWIPDB01"`(8) / `version=1`(1) / `flags`(1：bit0=payload 已 GZip、bit1=该小时 bytesPrecise) / `reserved`(2) / `hourStartUnix`(8) / `sessionStartUnix`(8) / `uncompressedLength`(4) / `bytesIn`(8) / `bytesOut`(8) / `peakInBps`(8) / `peakOutBps`(8) / `sampleCount`(4) / `ipCount`(4) / `procCount`(4)；其后 `IV`(16) + `ciphertextLength`(4) + `ciphertext` + `MAC`(32)。
+  `ciphertext = AES-256-CBC(PKCS7)( GZip( UTF8(JSON(DayData)) ) )`；`MAC = HMAC-SHA256(macKey, 字节[0 .. 96+N))`（encrypt-then-MAC、常量时间比较）。**明文头不含 IP/进程明细**。
+- **密钥**：`data\.storekey` = `magic "NWKEY001"`(8) + DPAPI blob，即 `ProtectedData.Protect(masterKey(32B 随机), entropy="NetWatcher2.3.HourStore.DPAPI.Entropy.v1", CurrentUser)`；
+  `macKey = HMAC-SHA256(masterKey, UTF8("NetWatcher2.3.HourStore.HmacKey.v1"))`；AES key 直接用 masterKey（无 KDF 迭代）。别的程序/Windows 用户/换机不可解密。
+- **落盘策略**：Monitor 内存维护 `current`（当天聚合，UI 用）与 `currentHour`（当前小时），**同一份采样增量并行更新**；每个采样周期 `SaveHour(currentHour.Clone())`（不再 15s 节流），断电/崩溃最多丢 <1 个采样周期；跨整点 flush 旧文件→新建空文件；跨日 flush 后重置天级并新建小时会话；退出 flush 当前小时（不再写日文件）；原子写 `<file>.<pid>.tmp` → Replace/Move。
+- **旧数据迁移**（`Store.MigrateLegacyOnce`：GUI/daemon 拿到数据写锁、创建 Monitor 时执行一次）：扫描 `data\*.json` → 加密写 legacy `.nwipdb` → **回读校验**（JSON 可解析 + bytesIn/Out/peak/sampleCount 完全一致 + ips/procs 数一致）→ 删除原 JSON；失败删除不可信 legacy 块、保留原 JSON、写 `monitor.log`、不阻塞（LoadDay 兜底读 JSON）；幂等；`--selftest` **不触发迁移**。
+- **按日期查看/合并**：`LoadDay(date)` 合并当天所有小时文件（+legacy）：bytes/peak/sampleCount 相加/取最大；IP/进程聚合求和（首末见 min/max、端口并集、归属地保留首个非空）；`samples` 按分钟排序 + 同分钟求和去重；同一天已有 legacy 块时不再读残留 JSON（防双计）。
+- **历史概览提速**：`LoadDaySummary` 单文件日/无文件日只读 76B 明文头；**多文件日解密合并去重**（修复"各文件头计数相加偏大"），`GetHistory` 用 SummaryOnly 缓存。
+- **自检**：`--selftest` 存储在 `selftest-store\` 子目录做小时文件加密往返、加密性（无明文 IP/"ips"）、明文头摘要、legacy 迁移、H7 性能两行与"真实 `data\` 未被 selftest 改写"护栏；`build.bat` 增加 `/r:System.Security.dll`。
+- **保留期**：`EnforceRetention` 按文件名日期删除过期 `.nwipdb`/`.json`（`.storekey` 不删）。
+
+### 验证（QA 回归 `main @ d634622`，2026-11-01）
+被测构建：`d634622` 源码编译（0 error / 0 warning；QA 阶段 152,064 B 未签名）；发布前用同一张证书重新签名——**153,488 B / 2.3.0.0 / Authenticode `Valid` / SHA256 `E129A678…`**（`CN=NSYBdeDFY NetWatcher`）。回归在签名前对同源构建执行，完整报告见 `_analysis\v230-验收\02-回归.md`。
+
+| 套件 | 结果 | run tag / 临时目录 |
+|---|---|---|
+| `regression-p0.ps1` | **PASS=32 / FAIL=0 / WARN=0**（R1 新口径：每次启动新增小时文件 + 同日合并累加、`.storekey` 270B、selftest 不迁移只读） | `20261101-181838` |
+| `regression-p1.ps1` | **PASS=39 / FAIL=0 / WARN=0**（R7 迁移断言、**R9=2.3.0.0**） | `20261101-182356` |
+| `regression-activation.ps1` | **PASS=9 / FAIL=0** | `nw21-act-cf020599` |
+| `regression-quit.ps1` | **PASS=6 / FAIL=0**（Q4 改解密合并确认落盘） | `nw21-quit-2121e735` |
+| `verify.ps1 -SkipGui -Seconds 30 -AuditRealData` | **PASS=35 / FAIL=0 / WARN=0**（DATA_* 改 `.nwipdb` 解密校验 + 5 项存储自检） | `20261101-182441` |
+| `verify.ps1 -Seconds 20 -MutexTag v230`（5 标签 GUI） | **PASS=59 / FAIL=0 / WARN=0**（迁移预置 json→legacy、趋势 24 桶/曲线像素） | `20261101-182539` |
+| `regression-v230.ps1`（H1~H7 存储专项） | **PASS=28 / FAIL=0 / WARN=0**（H2 实时落盘 8s 内 5 次变化；H3 二进制无明文/坏文件/错 key 不崩溃；H4 真实副本迁移 bytes/IP/进程/采样完全一致且删原 json；H5 每次启动新增+同日累加；H6 合并==求和/峰值 max/samples 升序；H7 24 文件合并 21ms、30 天首载 30ms） | `20261101-183214` |
+| **合计** | **208 项全 PASS，0 FAIL / 0 WARN / 0 TODO**（与 2.2.1 相比只增加存储断言/改口径，无既有断言退化） | |
+
+- 实现自测（dev，fixtures 真实数据副本）：迁移+重启+合并 17/17 PASS；真实数据构造的单次 `SaveHour` 平均 19.2ms（普通小文件预计 2~8ms）。
+- **真机 UI 验证（task-13，签名 exe，2026-11-01）**：**PASS=109 / FAIL=0 / WARN=0**，达到 v2.3.0 可发布 UI 门槛——迁移 3 天旧 JSON→3 个 legacy 加密块 **15ms**（+`.storekey` 270B、原 JSON 删除、独立解密逐项一致）；历史 3 天总下载/上传 **610.78 / 811.90 MB**（0% 误差）；10-31 历史行 = 82.36/244.22 MB、**74 进程 / 178 IP / 1592 采样**与旧 JSON 完全一致；按日/趋势（161 分钟桶）/进程视图（26 进程/1625 连接/326.58MB）一致；**LoadDaySummary 多小时修复**：今天历史行 vs 按日 = 采样 4207 vs 4206、**IP 217 vs 217、进程 102 vs 102**（去重精确）；二次启动幂等不重复迁移。
+- **新存储**：3 次启动各新增 1 个空小时文件（`监控_2026-11-01_18-00-00_s184104/184125/184126.nwipdb`，约 1KB）；12s 内文件 1,040→1,296B、sampleCount 1→6、bytes 0→11,626，命名/`sHHmmss` 与启动时间差 0~1s。
+- **加密/容错**：5 个 `.nwipdb` 均二进制无明文（430 个 token/IP 检查，可打印 ASCII 36.9%）；记事本打开为 `NWIPDB01`+乱码；篡改/截断/改名/错 key 均不崩溃、5 标签可用、`monitor.log` 有记录。
+- **30 天性能**（合成数据）：历史首载 **0ms**、按日 **1ms**、趋势 **20ms**、进程 **36ms**（阈值 <2000/800ms）；30 天迁移 5ms；5 标签/`--quit`/真实数据零改动（9 文件 size+mtime+SHA256 一致，真实 data 仍 3 旧 JSON、无 `.nwipdb`/`.storekey`）。
+- **未实机覆盖（如实记录）**：真实跨整点·跨日（不改系统时钟，用 30 天/多小时合成覆盖）、断电/强杀（只验证 `--quit`）、换机/换用户不可读（DPAPI 设计预期，仅验证错 key 不崩溃）；环境 Windows 10 x64 / PS 5.1 / 默认 DPI 100%。详见 `_analysis\v230-验收\03-真机验证.md`。
+- 提交：`2f72bad`（加密小时文件存储）、`06afc1e`（双聚合/实时落盘/selftest/性能）、`d634622`（历史概览多小时去重 + 版本升 2.3.0.0）；tag `v2.3.0`。
+
+### 限制（如实记录）
+- **迁移不可逆、回退受限**：迁移后旧版 2.2.x/2.1.x 读不到 `.nwipdb`；升级前必须备份 `data`，回退需用备份。
+- **仅本机本用户可读**：`.storekey` 由 DPAPI(CurrentUser) 保护，换机/换 Windows 用户/密钥丢失不可解密（跳过并记日志，不崩溃，无明文备份）。
+- **跨整点/跨日未实机触发**：不能安全改系统时钟；以合成 24 文件 + 逻辑/静态检查覆盖，H5 建议 QA 注入时钟。
+- **写放大**：每采样全量重写当前小时文件（真实数据构造单次 ~19.2ms；1s 高频采样后续建议改增量）。
+- 同一秒两次启动会覆盖同名空小时文件（刚启动无数据，影响可忽略）。
+- 明文头含汇总（字节/峰值/采样数/IP 数/进程数），不含 IP/进程明细（设计允许）。
+- 其他既有能力缺口不变：EStats 精确模式本机不可用（`rc=50 / winerr=122`）只能估算；UDP/QUIC 无法逐 IP 归因；IPv6 不在精确覆盖。
 
 ---
 

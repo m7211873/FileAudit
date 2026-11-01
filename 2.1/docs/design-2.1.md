@@ -1,8 +1,9 @@
-# IP监控2.1 · 设计契约（已实现 · 2.2.1 定版）
+# IP监控2.1 · 设计契约（已实现 · 2.3.0 定版）
 
-> 本文件是 IP监控2.1 的开发契约，**已于 2026-11-01 按 2.2.1 定版**：2.1.0 的 P0 四项 + P1 八项修复、
-> 2.1.1 托盘修复、2.2.0 的日期行/活动筛选/趋势页、2.2.1 的进程视图刷新状态保持均已落地并冻结；
-> 2.2.0 定版验证为 **164 项回归全 PASS + 419 项真机手测 PASS（0 FAIL / 0 WARN）**；2.2.1 回归同样 **164 项全 PASS**（p0 30/30、p1 38/38、activation 9/9、quit 6/6、headless 29/29、GUI 52/52，`_analysis\v221-验收\01-回归.md`），进程树刷新行为真机 UI 手测 **PASS=40 / FAIL=0 / WARN=0**（`_analysis\v221-验收\02-进程树状态验证.md`）。
+> 本文件是 IP监控2.1 的开发契约，**已于 2026-11-01 按 2.3.0 定版**：2.1.0 的 P0 四项 + P1 八项修复、
+> 2.1.1 托盘修复、2.2.0 的日期行/活动筛选/趋势页、2.2.1 的进程视图刷新状态保持、2.3.0 的加密小时文件存储（§13）均已落地并冻结。
+> 2.2.0 定版验证为 **164 项回归全 PASS + 419 项真机手测 PASS**；2.2.1 为 **164 项回归全 PASS + 40 项 UI 手测 PASS**；
+> 2.3.0 回归 **208 项全 PASS（0 FAIL / 0 WARN / 0 TODO）**（p0 32/32、p1 39/39、activation 9/9、quit 6/6、headless 35/35、GUI 59/59、H1–H7 28/28，`_analysis\v230-验收\02-回归.md`）；真机 UI 验证 **PASS=109 / FAIL=0 / WARN=0**（`_analysis\v230-验收\03-真机验证.md`）。
 > 基线：IP监控2.0.2（Gitee `main` = `b7b3720`），2.1 从 2.0 复制到 `2.1/` 后迭代。
 > 技术约束不变：**C# 5 语法、.NET Framework 4.8、WinForms、系统自带 `csc.exe`、零 NuGet、单个 `NetWatcher.exe`**。
 > 历史契约见 `docs/design-2.0.md`（保留，不再维护）；与 2.0 的差异汇总见 §12。
@@ -35,7 +36,7 @@
 | 单实例互斥量 | `NetWatcher2.1_SingleInstance_Mutex`（`--mutex-tag X` → `…_X`） |
 | 唤出事件 | `NetWatcher2.1_SingleInstance_Mutex_Activate`（`--mutex-tag X` → `…_X`） |
 | 数据写锁 | `NetWatcher2.1_DataLock_<MD5(数据目录绝对路径小写)>`（`--mutex-tag` 不影响） |
-| 程序集版本 | `AssemblyVersion` / `AssemblyFileVersion` = `2.2.1.0` |
+| 程序集版本 | `AssemblyVersion` / `AssemblyFileVersion` = `2.3.0.0` |
 | 产品/标题文案 | `IP监控2.1 (NetWatcher)` / `IP监控2.1 · 网络连接监控 (NetWatcher)` / `设置 · IP监控2.1` |
 | 仓库位置 | Gitee 根目录下的 `2.1/` 子文件夹（与 2.0 并列；根目录 2.0 文件一律不改） |
 
@@ -58,7 +59,7 @@
 - 精确字节**只覆盖 IPv4 TCP 连接**；IPv6 / UDP / QUIC 只计入整机总流量——运行模式 tooltip 明确写出（P1-10 已实现）。
 - UDP/QUIC 无法归因（系统表不提供 UDP 远端），UI 与 README 必须明确写出来。
 
-## 3. 数据模型（src/Storage.cs，沿用 2.0）
+## 3. 数据模型（src/Storage.cs；2.3.0 起为加密小时文件）
 
 ```csharp
 class IpConnAgg { string ip; long bytesIn, bytesOut; int connCount;
@@ -73,39 +74,42 @@ class IpAggregate { string ip; long bytesIn, bytesOut, peakInBps, peakOutBps, co
                     Dictionary<string,int> processes; Dictionary<string,int> states; List<int> ports;
                     string city, region, country, isp, hostname; bool bytesPrecise, isNew; }
 
-class DayData { string date; long bytesIn, bytesOut, peakInBps, peakOutBps;
+class DayData { string date;
+                long hourStartUnix, sessionStartUnix;   // 2.3.0：小时/本次会话起点（legacy 日块=0）
+                long bytesIn, bytesOut, peakInBps, peakOutBps;
                 long firstSampleUnix, lastSampleUnix; int sampleCount; bool bytesPrecise;
                 Dictionary<string, IpAggregate> ips;
-                Dictionary<string, ProcAgg> procs;     // key = name|pid|processStartUnix
-                List<long[]> samples; }                // [minuteUnix, bytesIn, bytesOut]，最多 1440 条
+                Dictionary<string, ProcAgg> procs;      // key = name|pid|processStartUnix
+                List<long[]> samples; }                 // [minuteUnix, bytesIn, bytesOut]；每个小时文件存该小时分钟桶，合并后每天最多 1440
 ```
 
-语义（沿用 2.0 修正）：
-- `IpAggregate.sessionCount`：**真实会话数**（该 IP 由"无连接"变"有连接"的次数），不是采样次数。
-- `IpAggregate.sampleCount`：出现过的采样次数。
-- `ProcAgg.connCount`：**本次连接出现次数**（每个连接只计一次），不再每采样累加。
-- `ProcAgg` 的 key 含进程启动时间，避免 PID 复用合并。
-- 旧数据（1.0 格式，`procs` key 为 `name|pid`）必须**仍能读出来**（字段缺失取默认值）。
-- **P1-9 已实现**：读取 1.0 旧数据时，若 `bytesPrecise=true` 但逐 IP 字节合计=0
-  （1.0 的"假精确"特征），自动把当天与逐 IP 的 `bytesPrecise` 降级为 false，界面按估算显示。
+语义（沿用 2.0 修正 + 2.3.0 存储）：
+- `IpAggregate.sessionCount`：**真实会话数**（该 IP 由"无连接"变"有连接"的次数），与采样次数无关。
+- `IpAggregate.sampleCount`/`ProcAgg.connCount`：出现过的采样次数 / 本次连接出现次数（每连接只计一次）。
+- `ProcAgg` 的 key 含进程启动时间，避免 PID 复用合并；旧数据（1.0/2.0 格式）必须仍能读出（字段缺失取默认值）。
+- **P1-9**：读到 1.0 "假精确"数据时自动把当天与逐 IP 的 `bytesPrecise` 降级为 false。
+- **2.3.0 小时文件**：每个 `.nwipdb` 存该小时聚合；`LoadDay(date)` 合并当天所有小时文件（含 legacy 日块）：bytes/peak/sampleCount 相加/取最大，IP/进程聚合求和（首末见 min/max、端口并集、归属地保留首个非空），`samples` 按分钟排序 + 同分钟求和去重。
+- **明文头 76B 仅元数据**（magic/版本/flags/小时·会话起点/汇总字节峰值采样数/IP 数/进程数），**IP/进程明细全在密文**；精确字节布局见 §13.3。`isNew`（`[ScriptIgnore]`）与 `ipCount/procCount`（内存汇总用）不进 JSON。
 
-`Store` API（原子写 + 2.1 唯一临时文件）：
+`Store` API（2.3.0）：
 ```csharp
-static void Init(string dir);
-static DayData LoadDay(string date);   // 不存在返回空 DayData；存在则完整读回（2.1：今天也要 Load）
-static void SaveDay(DayData d);        // 写 data\<date>.json.<进程PID>.tmp → File.Replace/Move 覆盖
-static List<string> ListDates();       // 倒序
-static void EnforceRetention(int days);
-static string DataDir { get; }
-static string DataLockName { get; }    // 2.1 数据写锁名
-static bool AcquireDataLock();         // 2.1 抢数据写锁（同名进程内幂等）
-static void ReleaseDataLock();
+static void Init(string dir);              // 只建目录（不生成 key、不迁移，保证 selftest 只读）
+static DayData LoadDay(string date);       // 合并当天所有小时文件（+legacy；无 legacy 块时 JSON 兜底）
+static DayData LoadDaySummary(string date);// 单文件日只读 76B 明文头；多文件日解密合并去重（历史概览）
+static void BeginSession(DayData hour);    // 创建本次会话空小时文件并写盘
+static void SaveHour(DayData hour);        // 加密原子写当前小时文件
+static void SaveDay(DayData d);            // 仅 legacy/selftest 写明文 JSON（Monitor 不再调用）
+static List<string> ListDates();           // 扫描 .nwipdb 文件名日期 + 残留 .json，倒序去重
+static void EnforceRetention(int days);    // 按文件名日期删 .nwipdb/.json（.storekey 不删）
+static void MigrateLegacyOnce();           // 旧 JSON → legacy .nwipdb → 回读校验 → 删明文
+static string DataDir / DataLockName; static bool AcquireDataLock(); static void ReleaseDataLock();  // 不变
 ```
 
-2.1 已实现要求：
-- **同日重启接续**：启动时若 `data\<今天>.json` 存在，读回并在此基础上继续累加（P0-1）。
-- **临时文件唯一名**：`.tmp` 文件名为 `<文件名>.<进程PID>.tmp`，并发或上次崩溃残留不会互相覆盖（P0-4 的一部分）。
-- 原子替换失败时保留旧文件，写 `monitor.log`，不得让半个 JSON 生效。
+2.3.0 已实现要求：
+- **同日重启接续**：启动时合并当天已有小时文件继续累加，并**新建本次空小时文件**（每次启动一个）；同一天多个文件属正常。
+- **实时落盘**：每个采样周期加密原子写当前小时文件（`<file>.<pid>.tmp` → Replace/Move），断电最多丢 <1 采样周期；跨整点/跨日/退出各 flush。
+- **迁移**：旧 `data\*.json` 加密为 legacy `.nwipdb` 并回读校验后删除明文；失败保留原文件并记 `monitor.log`；幂等；`--selftest` 不触发。
+- **健壮性**：坏文件/坏密钥/被篡改文件跳过并记日志，不崩溃；`.storekey` 由 DPAPI(CurrentUser) 保护，换机/换用户不可读。
 
 ## 4. 采集引擎（src/Monitor.cs + src/NativeMethods.cs，沿用 2.0）
 
@@ -296,13 +300,14 @@ P1 已实现：
 - GeoIP 查询（8.8.8.8 / 192.168.1.1）、存储读写、开机自启注册表、目录列表；
 - 结论行：`EStats 结论: 可用/不可用(原因)`。
 
-**2.1 硬约束（P0，已实现）**：
-1. 自检**对 `data\` 只读**：不得创建/覆盖 `data\<今天>.json`、不得写采样数据；
-   存储读写测试在 `<datadir>\selftest-store\` 临时子目录进行，用后删除；
+**2.1 硬约束（P0，已实现；2.3.0 扩展到加密存储）**：
+1. 自检**对 `data\` 只读**：不得创建/覆盖 `data\*.json`/`.nwipdb`、不得触发迁移、不得写采样数据；
+   存储读写测试在 `<datadir>\selftest-store\` 临时子目录进行，用后删除（2.3.0：小时文件加密往返/加密性/明文头摘要/legacy 迁移/H7 性能）；
 2. 自检**不得写/删 HKCU 自启项**：`Run\NetWatcher2.1` / `Run\NetWatcher` 只读检查；
    注册表往返测试用临时值名 `NetWatcher2.1_SelfTest_<PID>`，测完删除、无残留；
 3. 自检**不抢**数据写锁；
-4. 自检允许写 `<datadir>\selftest.log` 与一次 GeoIP 查询的 `geocache.json` 缓存。
+4. 自检允许写 `<datadir>\selftest.log` 与一次 GeoIP 查询的 `geocache.json` 缓存；
+5. **2.3.0 迁移只在 GUI/daemon 拿到数据写锁、创建 Monitor 时执行一次**；`--selftest` 不创建 Monitor，故天然不迁移（实测 datadir 预置 legacy JSON 跑 selftest 后文件列表与内容不变）。
 
 命令行（已实现）：`--background|--minimized`、`--show`、`--daemon <秒>`、`--datadir <路径>`、
 `--selftest|--test`、`--mutex-tag <标签>`、`--autostart-on/off`、`--quit|--exit`（优雅退出）。
@@ -328,7 +333,7 @@ P1 已实现：
 |---|---|---|
 | P2 | 体验项 | 列宽记忆、CSV 导出范围等；~~历史趋势图~~ ✅ 2.2.0 已实现（趋势页） |
 | 交付-1 | 真机安装/卸载验证 | ✅ 2026-10-31 真机通过（install→数据续接→uninstall 保留数据→重装），见 `2.1-真机验收补记.md` |
-| 交付-2 | 打包与发布 | `IP监控2.1-发布包.zip`（2.2.1）；Gitee/GitHub push、tag、Release 见 tag `v2.2.1` |
+| 交付-2 | 打包与发布 | `IP监控2.1-发布包.zip`（2.3.0）；Gitee/GitHub push、tag、Release 见 tag `v2.3.0`（2.3.0 新格式不兼容 2.2.x 读取） |
 | 限制-1 | 管理员重启/UAC | P1-7 无法自动化，仅静态检查 |
 | 限制-2 | EStats 成功路径 | 本机非管理员不可用（`rc=50/winerr=122`），P1-12 仅静态检查 |
 | 限制-3 | 刷新节流动态计时 | P1-11 仅静态阈值检查 |
@@ -344,30 +349,30 @@ P1 已实现：
 | QA | `2.1/tools/qa/**` |
 | 根目录 2.0 | **全部冻结，任何人不改** |
 
-## 11. 验收标准（2.2.0 已达成）
+## 11. 验收标准（2.3.0 已达成）
 
-- [x] `2.1\build.bat` 干净编译（0 error/0 warning），`bin\NetWatcher.exe` 可双击运行，版本资源 **2.2.1.0**
+- [x] `2.1\build.bat` 干净编译（0 error/0 warning；2.3.0 起引 `/r:System.Security.dll` 供 DPAPI），`bin\NetWatcher.exe` 可双击运行，版本资源 **2.3.0.0**
 - [x] **五个标签页**可见、可切换（含趋势页；GUI 冒烟：标签栏 100% 可见、文本正确、真实点击通过）
 - [x] 普通用户模式：总流量、速率、连接明细、城市、历史均正常；逐 IP 明确标注"估算"
 - [x] **P0-1 同日重启**：`sampleCount 6→12`、`firstSampleUnix` 不变、bytes 不回退
 - [x] **P0-2 自检只读**：哨兵 SHA256/大小/字段前后完全一致，`data\` 文件集合不变
 - [x] **P0-3 自检不动自启**：`Run\NetWatcher2.1` 与 `Run\NetWatcher` 前后一致、无临时值残留
-- [x] **P0-4 单写锁**：同 datadir 再起 `--daemon` → 退出码 2；GUI 冲突弹「IP监控2.1」提示框；
-      `--selftest` 不被写锁阻塞；`--mutex-tag` 不绕过写锁
+- [x] **P0-4 单写锁**：同 datadir 再起 `--daemon` → 退出码 2；GUI 冲突弹「IP监控2.1」提示框；`--selftest` 不被写锁阻塞；`--mutex-tag` 不绕过写锁
 - [x] **P1-5~P1-12**：回归 38/38 PASS（P1-7/11/12 为静态证据，已如实记录）
 - [x] **2.2.0 日期行/活动筛选/趋势页**：日期行按页生效、6 项筛选语义、趋势归一化/断点/Y 轴/悬停均已实现；最终全量回归 **164 项全 PASS（0 FAIL / 0 WARN）**（见 `_analysis\v220-验收\02-最终回归.md`、`03-手工验收.md`）
-- [x] **2.2.1 进程视图刷新状态**：稳定 key、默认全部折叠、恢复展开/选中/滚动、新节点折叠、切页保持（实现见 §5.6）；回归 **164 项全 PASS**（`_analysis\v221-验收\01-回归.md`），进程树行为真机 UI 手测 **PASS=40 / FAIL=0 / WARN=0**（`_analysis\v221-验收\02-进程树状态验证.md`）
+- [x] **2.2.1 进程视图刷新状态**：稳定 key、默认全部折叠、恢复展开/选中/滚动、新节点折叠、切页保持（实现见 §5.6）；回归 **164 项全 PASS**（`_analysis\v221-验收\01-回归.md`），进程树行为真机 UI 手测 **PASS=40 / FAIL=0 / WARN=0**
+- [x] **2.3.0 加密小时文件存储**：`.nwipdb` 格式（76B 明文头/16B IV/密文/32B HMAC）、DPAPI 密钥 `.storekey`、每采样实时落盘、跨整点/跨日、旧 JSON 迁移删明文、历史概览多小时去重；`--selftest` 加密/迁移/性能/真实 `data\` 只读护栏；回归 **7 套件 208 项全 PASS（0 FAIL / 0 WARN / 0 TODO；p0 32/32、p1 39/39、activation 9/9、quit 6/6、headless 35/35、GUI 59/59、H1–H7 28/28）**（`_analysis\v230-验收\02-回归.md`），真机 UI 验证 **PASS=109 / FAIL=0 / WARN=0**（`_analysis\v230-验收\03-真机验证.md`）
 - [x] 数据原子写入；`verify.ps1` 数据链路检查全 PASS（逐 IP 对账误差 0、分钟桶上限、无残留 .tmp）
 - [x] `2.1\install.ps1` / `uninstall.ps1` 幂等；**只动 NetWatcher2.1**（PS 5.1 Parser 0 error；真机安装/卸载验收通过，见 `2.1-真机验收补记.md`）
 - [x] 签名：`bin\NetWatcher.exe` 用 **2.0 已有证书**签名成功，Authenticode `Valid`
-- [x] 文档齐套且版本号统一 **2.2.0**：README / CHANGELOG / START-HERE / design-2.1 / 用户手册 / 开发与维护指南 / 踩坑记录 / 2.1-交接说明
-- [x] 「IP监控2.1」在 `2.1/` 文件夹（与 2.0 并列；根目录 2.0 文件不动）——2.2.1 定版已合并 `main` 并推送 Gitee + GitHub、tag `v2.2.1`、GitHub Release（发布提交号见 tag）
+- [x] 文档齐套且版本号统一 **2.3.0**：README / CHANGELOG / START-HERE / design-2.1 / 用户手册 / 开发与维护指南 / 踩坑记录 / 2.1-交接说明
+- [x] 「IP监控2.1」在 `2.1/` 文件夹（与 2.0 并列；根目录 2.0 文件不动）——2.3.0 定版已合并 `main`（`d634622`）、推送 Gitee + GitHub、tag `v2.3.0`、GitHub Release（发布提交号见 tag）
 
-## 12. 与 2.0 的差异（汇总，2.2.0 沿用）
+## 12. 与 2.0 的差异（汇总，2.3.0 沿用）
 
-| 维度 | 2.0.2 | 2.1.x / 2.2.0 / 2.2.1 |
+| 维度 | 2.0.2 | 2.1.x / 2.2.0 / 2.2.1 / 2.3.0 |
 |---|---|---|
-| 程序名 / 版本 | IP监控2.0 / 2.0.2.0 | IP监控2.1 / **2.2.1.0** |
+| 程序名 / 版本 | IP监控2.0 / 2.0.2.0 | IP监控2.1 / **2.3.0.0** |
 | 安装目录 / 自启值 / 快捷方式 | `Programs\NetWatcher` / `NetWatcher` / `IP监控.lnk` | `Programs\NetWatcher2.1` / `NetWatcher2.1` / `IP监控2.1.lnk` |
 | 数据目录 | `%APPDATA%\NetWatcher` | 不变（2.0/2.1 共用，禁止同时运行） |
 | 单实例 | `NetWatcher_SingleInstance_Mutex` | `NetWatcher2.1_SingleInstance_Mutex`（+ `_Activate`） |
@@ -389,3 +394,69 @@ P1 已实现：
 | 日期行 | 未按页生效、无选中态 | **按页生效**（实时页换活动筛选；今天恒可选/无数据置灰/禁未来/空态；跨日自动刷新） |
 | 活动筛选 | 无 | **6 项**（全部 / 今天新出现 / 仅活跃 / 当前速度 Top20 / 仅公网 / 长连接>60s） |
 | 趋势 | 无 | **24h 上下行曲线**（samples 分钟桶归一化、空档 >5 分钟断开、Y 轴取整、悬停读数） |
+| 存储 | 按日明文 JSON（`data\YYYY-MM-DD.json`） | **2.3.0：加密小时文件**（`data\监控_<日期>_<小时>_s<启动>.nwipdb` + `.storekey`；DPAPI+AES+HMAC+GZip；旧 JSON 迁移后删明文） |
+
+## 13. 存储与加密设计（v2.3.0，已实现并定版）
+
+> 依据 `_analysis\v230-验收\00-设计-加密小时存储.md` 与 dev `01-实现说明.md`（含合并前补丁 `d634622`）；实现见 `2.1/src/Storage.cs`、`Monitor.cs`、`Program.cs`、`build.bat`。
+
+### 13.1 文件命名与位置
+- `%APPDATA%\NetWatcher\data\监控_<yyyy-MM-dd>_<HH-00-00>_s<HHmmss>.nwipdb`；后缀 **`.nwipdb`**；小时起点用本地整点、`s` 为本次启动本地时分秒（秒级）。
+- 旧数据迁移文件：`监控_<date>_00-00-00_legacy000000.nwipdb`（hourStartUnix/sessionStartUnix = 0）。
+- 密钥文件：`data\.storekey` = `magic "NWKEY001"`(8) + DPAPI blob（空文件实测约 270B，随 Windows 版本略异）。
+- 每次程序启动（含开机自启）创建**新的空小时文件**；同一小时多次启动会多个文件、按日期查看时合并。同一秒两次启动会覆盖同名空文件（刚启动无数据，影响可忽略）。
+
+### 13.2 文件内容
+- 每小时文件 = 该小时聚合（`DayData` 同构 + `hourStartUnix`/`sessionStartUnix`）：小时总字节/峰值/采样数、分钟桶 `samples`、IP 聚合 `ips`、进程聚合 `procs`。
+- 密文内 JSON 顶层字段：`date, hourStartUnix, sessionStartUnix, bytesIn, bytesOut, peakInBps, peakOutBps, firstSampleUnix, lastSampleUnix, sampleCount, bytesPrecise, ips{}, procs{}, samples[]`；`ips.*` 含 bytes/峰值/时长/采样/会话/首末见/processes/states/ports/city/region/country/isp/hostname/bytesPrecise（`isNew` 为 `[ScriptIgnore]` 不落盘）；`procs.*` 含 name/path/pid/processStartUnix/bytes/connCount/首末见/ips 明细。
+- 按日期查看：合并当天所有小时文件（+legacy）为 DayData；今天在合并结果上继续累加内存数据。
+
+### 13.3 加密与格式（`.nwipdb`，little-endian）
+| 偏移 | 长度 | 字段 |
+|---|---|---|
+| 0 | 8 | magic `"NWIPDB01"` |
+| 8 | 1 | version = 1（读取时 `version!=1` 判坏） |
+| 9 | 1 | flags：bit0=payload 已 GZip；bit1=该小时 bytesPrecise |
+| 10 | 2 | reserved = 0 |
+| 12 | 8 | hourStartUnix（legacy=0） |
+| 20 | 8 | sessionStartUnix（legacy=0） |
+| 28 | 4 | uncompressedLength（GZip 前 JSON UTF-8 字节数） |
+| 32 | 8 | bytesIn |
+| 40 | 8 | bytesOut |
+| 48 | 8 | peakInBps |
+| 56 | 8 | peakOutBps |
+| 64 | 4 | sampleCount |
+| 68 | 4 | ipCount（该文件 ips 去重后数） |
+| 72 | 4 | procCount |
+| 76 | 16 | IV（AES-CBC，每文件每次写盘重新生成） |
+| 92 | 4 | ciphertextLength N |
+| 96 | N | ciphertext = AES-256-CBC(PKCS7)(GZip(UTF8(JSON(DayData)))) |
+| 96+N | 32 | MAC = HMAC-SHA256(macKey, 字节[0 .. 96+N)) |
+
+- 最小文件长度 96+16+32 = **144B**；空小时文件约 300~600B。明文头 = 76B（不含 IP/进程明细），**日期只能从文件名解析**（头里不含日期）。
+- 密钥：首次写入生成 32B 随机 masterKey → `ProtectedData.Protect(masterKey, entropy, CurrentUser)` 存 `.storekey`；entropy = UTF-8 `NetWatcher2.3.HourStore.DPAPI.Entropy.v1`（40B）；`macKey = HMAC-SHA256(masterKey, UTF8("NetWatcher2.3.HourStore.HmacKey.v1"))`；AES key 直接用 masterKey（**无 KDF 迭代**）。encrypt-then-MAC，MAC 常量时间比较。
+- 原子写：`<file>.<pid>.tmp` → Replace/Move。
+
+### 13.4 落盘策略
+- 启动：`Store.Init`（只建目录，不生成 key、不迁移）→（GUI/daemon 拿到数据写锁后创建 Monitor）`MigrateLegacyOnce()` → `LoadDay(today)` 合并 → `BeginHourSession()` 新建本次空小时文件并立即写盘。
+- 每采样：同一增量并行更新 `current`（当天，UI 用）与 `currentHour`（落盘用）；结束后 `SaveHour(currentHour.Clone())` 加密原子全量重写（**不再 15s 节流**），断电最多丢 <1 采样周期。
+- 跨整点：`CheckHourRotation` 采样前比较本地整点 → `RotateHour`：flush 旧小时 → 新建空小时 → 新 currentHour（当天聚合不清空）。跨日：`RotateDay` flush 旧小时 → `LoadDay(新日)` → 重置天级状态（prevActiveIps/connStates/累计差）→ 新小时会话。退出 `Stop()` flush 当前小时（不再写日文件）。
+- 保留期：每 300 个采样（约 10 分钟）`EnforceRetention`，按文件名日期删过期 `.nwipdb`/`.json`（`.storekey` 不删）。
+- 合并规则：按文件名排序解密合并；bytes/peak/sampleCount 相加/取最大；IP/进程聚合求和（首末见 min/max、端口并集、归属地保留首个非空）；`samples` 按分钟排序 + 同分钟求和去重；已有 legacy 块时不再读残留 JSON（防双计），无 legacy 块时读 JSON 兜底。
+- 实测性能：24 小时文件合并 **21~22ms**（合成 1440 采样/24 IP）；30 天历史首载 **~29ms**（33 天，含一个 24 文件日）；真实数据构造的单次 `SaveHour` 平均 **19.2ms**（加密文件 32,624B；普通小文件预计 2~8ms）。
+
+### 13.5 旧数据迁移（`Store.MigrateLegacyOnce`）
+- 调用时机：**仅 GUI/daemon 拿到数据写锁、创建 Monitor 时一次**；`--selftest` 不创建 Monitor，不迁移。
+- 流程：扫描 `data\*.json`（10 位日期名）→ 读 DayData（hour/session=0）→ 加密写 legacy `.nwipdb` → **回读校验**（JSON 可解析 + bytesIn/Out/peak/sampleCount 完全一致 + ips/procs 数一致）→ 删除原 JSON。
+- 失败：删除不可信 legacy 块、保留原 JSON、写 `monitor.log`（`STORE:`）、不阻塞（LoadDay 兜底读 JSON）；`.json` 删除失败也会保留，下次启动覆盖 legacy 块后重新校验删除，不双计。
+- 幂等：无 `.json` 跳过；`.storekey` 已存在复用。**不可逆**：迁移后旧版读不到新格式；升级前必须备份 `data`。
+
+### 13.6 Store / Monitor API
+- `Store.Init(dir)` 只建目录（不生成 key/不迁移，保证 selftest 只读）；`BeginSession(DayData hour)`、`SaveHour(DayData hour)`、`LoadDay(date)`（合并所有小时+legacy+JSON 兜底）、`LoadDaySummary(date)`（单文件日只读 76B 头；**多文件日 `LoadDay(date).SummaryOnly()` 解密合并去重**）、`ListDates`、`EnforceRetention(days)`、`MigrateLegacyOnce()`；`SaveDay` 仅 legacy/selftest；`DataPath/KeyPath/HourFileName/HourFilePath/HourFileDate/DataDir/AcquireDataLock/ReleaseDataLock` 保留。
+- Monitor：`currentHour/sessionStartUnix/hourStartUnix`；构造时迁移+合并+`BeginHourSession`；`GetHistory` 用 `LoadDaySummary`；`Stop` flush 当前小时。
+- 自检：`--selftest` 存储在 `selftest-store\` 做加密往返/加密性/明文头摘要/legacy 迁移/H7 性能/真实 `data\` 只读护栏；`build.bat` 加 `/r:System.Security.dll`。
+
+### 13.7 验收（QA/UI）
+- QA：H1 启动即建空小时文件（可解密、空 payload、文件名正确）；H2 实时落盘（采样后 2~6s 内 mtime/大小/汇总增长）；H3 加密性（二进制、无明文 IP/`"ips"`、坏文件/坏密钥跳过不崩溃）；H4 迁移（副本）；H5 跨小时/跨日（注入时钟）；H6 合并正确性；H7 性能；R1 改为"重启后合并 + 新增小时文件"。
+- UI：迁移后历史/按日/趋势/进程视图正常、文件名/后缀/大小可见、真实数据迁移在副本上验证。
+- 2.3.0 验收：回归 **7 套件 208 项全 PASS（0 FAIL / 0 WARN / 0 TODO；p0 32/32、p1 39/39、activation 9/9、quit 6/6、headless 35/35、GUI 59/59、H1–H7 28/28）**（`_analysis\v230-验收\02-回归.md`）+ 真机 UI **PASS=109 / FAIL=0 / WARN=0**（`_analysis\v230-验收\03-真机验证.md`）；未实机项见 `03` §9（真实跨整点·跨日、断电、换机不可读）。
