@@ -16,6 +16,7 @@ if not exist bin mkdir bin
   /r:"%FW%\System.Drawing.dll" ^
   /r:"%FW%\System.Web.Extensions.dll" ^
   /r:"%FW%\System.Core.dll" ^
+  /r:"%FW%\System.Security.dll" ^
   src\AssemblyInfo.cs src\Config.cs src\GeoIp.cs src\Json.cs src\MainForm.cs src\Monitor.cs src\NativeMethods.cs src\Program.cs src\SettingsForm.cs src\Storage.cs
 
 if errorlevel 1 (
