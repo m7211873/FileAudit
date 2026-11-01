@@ -65,7 +65,10 @@ namespace NetWatcher
         readonly object liveLock = new object();
         readonly object historyLock = new object();
 
-        DayData current;
+        DayData current;              // 当天聚合（UI/实时用）
+        // 2.3.0：当前小时聚合（落盘用），与 current 由同一份采样增量并行更新
+        DayData currentHour;
+        long sessionStartUnix = 0;    // 本次启动时间（unix 秒；小时文件名 _sHHmmss 用）
         string currentDate = "";
         readonly HashSet<string> prevActiveIps = new HashSet<string>();
         readonly Dictionary<string, ConnState> connStates = new Dictionary<string, ConnState>();
@@ -82,6 +85,10 @@ namespace NetWatcher
         public Monitor(AppConfig cfg)
         {
             this.cfg = cfg;
+            // 2.3.0：先把旧明文 data\*.json 迁移为加密 legacy 日块（幂等；失败保留明文并由 LoadDay 兜底读取）。
+            // 由 Program 在拿到数据写锁之后才创建 Monitor，所以这里迁移是单写安全的。
+            try { Store.MigrateLegacyOnce(); }
+            catch (Exception mex) { LogMonitor("旧数据迁移异常: " + mex.Message); }
             // 2.1 修复（P0-1）：同一天内重启必须接续当天已落盘的数据，
             // 否则第一次落盘会用只含本次会话的 DayData 覆盖整天累计（退出重开 / 管理员重启 / 崩溃重启都会丢数据）。
             string today = DateTime.Now.ToString("yyyy-MM-dd");
@@ -111,6 +118,8 @@ namespace NetWatcher
                         prevActiveIps.Add(kv.Key);
                 }
             }
+            // 2.3.0：本次启动新建一个空的当前小时文件（同一小时多次启动会有多个文件，按日期查看时合并）
+            BeginHourSession();
         }
 
         public string LastEStatsError { get { lock (liveLock) return lastEStatsError; } }
@@ -129,7 +138,7 @@ namespace NetWatcher
             try { if (thread != null) thread.Join(3000); } catch { }
             lock (liveLock)
             {
-                try { Store.SaveDay(current); } catch { }
+                try { if (currentHour != null) Store.SaveHour(currentHour.Clone()); } catch { }
             }
         }
 
@@ -200,6 +209,7 @@ namespace NetWatcher
             long unix = NowUnix();
             string date = now.ToString("yyyy-MM-dd");
             if (date != currentDate) RotateDay(date);
+            else CheckHourRotation(now);   // 2.3.0：跨整点换小时文件，当天聚合不清空
 
             // 活动连接筛选：记录所有"有远端"的 TCP 连接状态（ESTABLISHED / SYN_SENT / FIN_WAIT /
             // TIME_WAIT / CLOSE_WAIT 等），只排除 LISTEN。这样与资源监视器的口径更接近，
@@ -374,163 +384,22 @@ namespace NetWatcher
             Dictionary<string, GeoInfo> geoMap = new Dictionary<string, GeoInfo>();
             foreach (string ip in byIp.Keys) geoMap[ip] = GeoIp.Lookup(ip);
 
-            DayData toSave = null;
+            DayData toSaveHour = null;
             lock (liveLock)
             {
-                if (current.firstSampleUnix == 0) current.firstSampleUnix = unix;
-                current.lastSampleUnix = unix;
-                current.sampleCount++;
-                current.bytesIn += deltaIn;
-                current.bytesOut += deltaOut;
-                if (totalInBps > current.peakInBps) current.peakInBps = totalInBps;
-                if (totalOutBps > current.peakOutBps) current.peakOutBps = totalOutBps;
-                if (precise) current.bytesPrecise = true;
+                // 2.3.0：同一份采样增量同时更新「当天聚合 current」（UI/实时用）与「当前小时聚合 currentHour」（落盘用）
+                ApplySampleScalars(current, unix, deltaIn, deltaOut, totalInBps, totalOutBps, precise);
+                ApplySampleScalars(currentHour, unix, deltaIn, deltaOut, totalInBps, totalOutBps, precise);
 
-                // 分钟桶（最多 1440 条 = 24 小时）
-                // 2.2.0 收口：保持「按分钟升序 + 每分钟唯一」的不变量（趋势页直接依赖它）。
-                // 系统时钟回拨/被校时会算出更早的分钟：旧实现直接 Append 会产生乱序，
-                // 趋势页就会画出“回跳竖线”；这里按分钟二分插入/就地累加，从生产者侧就杜绝乱序。
-                long minute = unix - (unix % 60);
-                int minutePos = FindSampleMinute(current.samples, minute);
-                if (minutePos >= 0)
-                {
-                    long[] bucket = current.samples[minutePos];
-                    bucket[1] += deltaIn;
-                    bucket[2] += deltaOut;
-                }
-                else
-                {
-                    current.samples.Insert(~minutePos, new long[] { minute, deltaIn, deltaOut });
-                }
-                while (current.samples.Count > 1440) current.samples.RemoveAt(0);
-
-                // 逐 IP 聚合
-                HashSet<string> newActive = new HashSet<string>();
-                foreach (KeyValuePair<string, List<ConnEntry>> kv in byIp)
-                {
-                    string ip = kv.Key;
-                    List<ConnEntry> list = kv.Value;
-                    newActive.Add(ip);
-
-                    IpAggregate a;
-                    if (!current.ips.TryGetValue(ip, out a)) { a = new IpAggregate(); a.ip = ip; current.ips[ip] = a; }
-
-                    a.sampleCount++;
-                    a.connectedSeconds += (long)Math.Round(elapsed);
-                    if (a.firstSeenUnix == 0)
-                    {
-                        a.firstSeenUnix = unix;
-                        a.isNew = true;
-                    }
-                    a.lastSeenUnix = unix;
-                    if (!prevActiveIps.Contains(ip))
-                    {
-                        a.sessionCount++;
-                        // 2.2.0 收口：这里不再重复置 isNew——「今天新出现」只由「首次出现」决定；
-                        // 同一天内断线重连不算“新出现”。重启后由构造函数按 firstSeenUnix 重建。
-                    }
-
-                    long[] b = perIpBytes[ip];
-                    a.bytesIn += b[0];
-                    a.bytesOut += b[1];
-                    if (elapsed > 0)
-                    {
-                        long ipInBps = (long)(b[0] / elapsed);
-                        long ipOutBps = (long)(b[1] / elapsed);
-                        if (ipInBps > a.peakInBps) a.peakInBps = ipInBps;
-                        if (ipOutBps > a.peakOutBps) a.peakOutBps = ipOutBps;
-                    }
-                    if (precise) a.bytesPrecise = true;
-
-                    GeoInfo g;
-                    if (geoMap.TryGetValue(ip, out g) && g != null && (g.Country.Length > 0 || g.City.Length > 0))
-                    {
-                        a.city = g.City; a.region = g.Region; a.country = NormalizeCn(g.Country); a.isp = g.Isp;
-                        if (!string.IsNullOrEmpty(g.Host)) a.hostname = g.Host;
-                    }
-
-                    for (int j = 0; j < list.Count; j++)
-                    {
-                        ConnEntry c = list[j];
-                        string pn = string.IsNullOrEmpty(c.ProcessName) ? "(未知)" : c.ProcessName;
-                        if (!a.processes.ContainsKey(pn)) a.processes[pn] = 0;
-                        a.processes[pn]++;
-                        if (!a.states.ContainsKey(c.State)) a.states[c.State] = 0;
-                        a.states[c.State]++;
-                        if (!a.ports.Contains(c.RemotePort)) a.ports.Add(c.RemotePort);
-                    }
-                }
+                // sessionCount 以「天」为连续口径：用采样前的活跃集合判断，两个聚合共用同一判断结果，
+                // 这样跨整点/跨小时文件不会把“一直在线的 IP”重复计成新会话。
+                HashSet<string> wasActive = new HashSet<string>(prevActiveIps);
+                PatchIpAggregates(current, byIp, perIpBytes, geoMap, unix, elapsed, precise, wasActive);
+                PatchIpAggregates(currentHour, byIp, perIpBytes, geoMap, unix, elapsed, precise, wasActive);
                 prevActiveIps.Clear();
-                foreach (string ip in newActive) prevActiveIps.Add(ip);
-
-                // 逐进程聚合
-                foreach (KeyValuePair<string, List<ConnEntry>> kv in byIp)
-                {
-                    for (int j = 0; j < kv.Value.Count; j++)
-                    {
-                        ConnEntry c = kv.Value[j];
-                        string pk = ProcKey(c);
-                        ProcAgg pa;
-                        if (!current.procs.TryGetValue(pk, out pa))
-                        {
-                            pa = new ProcAgg();
-                            pa.name = string.IsNullOrEmpty(c.ProcessName) ? "(未知)" : c.ProcessName;
-                            pa.path = c.ProcessPath;
-                            pa.pid = c.Pid;
-                            pa.processStartUnix = c.ProcessStartUnix;
-                            current.procs[pk] = pa;
-                        }
-                        if (pa.firstSeenUnix == 0) pa.firstSeenUnix = unix;
-                        pa.lastSeenUnix = unix;
-
-                        IpConnAgg ia;
-                        if (!pa.ips.TryGetValue(c.RemoteIp, out ia))
-                        {
-                            ia = new IpConnAgg();
-                            ia.ip = c.RemoteIp;
-                            ia.proto = c.Proto;
-                            ia.firstSeenUnix = unix;
-                            pa.ips[c.RemoteIp] = ia;
-                        }
-                        GeoInfo g;
-                        if (geoMap.TryGetValue(c.RemoteIp, out g) && g != null)
-                        {
-                            ia.city = g.City; ia.region = g.Region; ia.country = NormalizeCn(g.Country);
-                            ia.isp = g.Isp; ia.hostname = g.Host;
-                        }
-                        if (!ia.ports.Contains(c.RemotePort)) ia.ports.Add(c.RemotePort);
-
-                        // 连接次数：同一连接只计一次（用 connStates 的首见时间判断）
-                        ConnState cs;
-                        if (connStates.TryGetValue(ConnKey(c), out cs) && cs.FirstSeenUnix == unix)
-                        {
-                            ia.connCount++;
-                            pa.connCount++;
-                        }
-                    }
-                }
-                foreach (KeyValuePair<string, long[]> kv in procBytes)
-                {
-                    ProcAgg pa;
-                    if (current.procs.TryGetValue(kv.Key, out pa))
-                    {
-                        pa.bytesIn += kv.Value[0];
-                        pa.bytesOut += kv.Value[1];
-                    }
-                }
-                foreach (KeyValuePair<string, long[]> kv in procIpBytes)
-                {
-                    int bar = kv.Key.LastIndexOf('|');
-                    if (bar <= 0) continue;
-                    string pk = kv.Key.Substring(0, bar);
-                    string ip = kv.Key.Substring(bar + 1);
-                    ProcAgg pa;
-                    if (!current.procs.TryGetValue(pk, out pa)) continue;
-                    IpConnAgg ia;
-                    if (!pa.ips.TryGetValue(ip, out ia)) continue;
-                    ia.bytesIn += kv.Value[0];
-                    ia.bytesOut += kv.Value[1];
-                }
+                foreach (KeyValuePair<string, List<ConnEntry>> kv in byIp) prevActiveIps.Add(kv.Key);
+                PatchProcAggregates(current, byIp, procBytes, procIpBytes, geoMap, unix, connStates);
+                PatchProcAggregates(currentHour, byIp, procBytes, procIpBytes, geoMap, unix, connStates);
 
                 // 快照
                 Snapshot s = new Snapshot();
@@ -630,19 +499,238 @@ namespace NetWatcher
                 });
                 snap = s;
 
-                // 落盘节流：至少 15 秒一次
-                if (unix - lastPersistUnix >= 15)
-                {
-                    lastPersistUnix = unix;
-                    persistCount++;
-                    toSave = current.Clone();
-                }
+                // 2.3.0：每个采样周期都实时加密落盘当前小时（不再 15 秒节流）；
+                // 退出/跨小时/跨日也会各 flush 一次，断电最多丢 <1 个采样周期。
+                lastPersistUnix = unix;
+                persistCount++;
+                toSaveHour = currentHour.Clone();
             }
 
-            if (toSave != null)
+            if (toSaveHour != null)
             {
-                Store.SaveDay(toSave);
-                if (persistCount % 20 == 0) Store.EnforceRetention(cfg.RetentionDays);
+                Store.SaveHour(toSaveHour);
+                if (persistCount % 300 == 0) Store.EnforceRetention(cfg.RetentionDays);
+            }
+        }
+
+        // =============================================================
+        // 2.3.0：采样增量同时写入「当天聚合 current」与「当前小时聚合 currentHour」
+        // =============================================================
+
+        static DayData NewHourData(string date, long hourStartUnix, long sessionStartUnix)
+        {
+            DayData h = new DayData();
+            h.date = date;
+            h.hourStartUnix = hourStartUnix;
+            h.sessionStartUnix = sessionStartUnix;
+            return h;
+        }
+
+        // 当前小时起点（本地整点 → unix 秒）
+        internal static long LocalHourStartUnix(DateTime now)
+        {
+            DateTime local = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+            try
+            {
+                return (long)(TimeZoneInfo.ConvertTimeToUtc(local, TimeZoneInfo.Local) - UnixEpochUtc).TotalSeconds;
+            }
+            catch
+            {
+                return (long)(local.ToUniversalTime() - UnixEpochUtc).TotalSeconds;
+            }
+        }
+
+        // 启动/跨日：创建当前小时的空文件并立刻写盘（每次启动一个新文件）
+        void BeginHourSession()
+        {
+            long now = NowUnix();
+            sessionStartUnix = now;
+            currentHour = NewHourData(currentDate, LocalHourStartUnix(DateTime.Now), now);
+            try
+            {
+                if (!Store.BeginSession(currentHour))
+                    LogMonitor("创建小时文件失败: " + Store.HourFilePath(currentHour));
+            }
+            catch (Exception ex)
+            {
+                LogMonitor("创建小时文件异常: " + ex.Message);
+            }
+        }
+
+        void CheckHourRotation(DateTime now)
+        {
+            if (currentHour == null) { BeginHourSession(); return; }
+            long h = LocalHourStartUnix(now);
+            if (h == currentHour.hourStartUnix) return;
+            RotateHour(h);
+        }
+
+        // 跨整点：flush 旧小时文件 → 建立新小时文件（空）→ 新 currentHour；当天聚合继续累加，不清空。
+        void RotateHour(long newHourStartUnix)
+        {
+            lock (liveLock)
+            {
+                try { if (currentHour != null) Store.SaveHour(currentHour.Clone()); }
+                catch (Exception ex) { LogMonitor("小时文件 flush 失败: " + ex.Message); }
+                currentHour = NewHourData(currentDate, newHourStartUnix, sessionStartUnix);
+                try
+                {
+                    if (!Store.BeginSession(currentHour))
+                        LogMonitor("新建小时文件失败: " + Store.HourFilePath(currentHour));
+                }
+                catch (Exception ex) { LogMonitor("新建小时文件异常: " + ex.Message); }
+            }
+        }
+
+        static void ApplySampleScalars(DayData target, long unix, long deltaIn, long deltaOut,
+            long totalInBps, long totalOutBps, bool precise)
+        {
+            if (target == null) return;
+            if (target.firstSampleUnix == 0) target.firstSampleUnix = unix;
+            target.lastSampleUnix = unix;
+            target.sampleCount++;
+            target.bytesIn += deltaIn;
+            target.bytesOut += deltaOut;
+            if (totalInBps > target.peakInBps) target.peakInBps = totalInBps;
+            if (totalOutBps > target.peakOutBps) target.peakOutBps = totalOutBps;
+            if (precise) target.bytesPrecise = true;
+
+            // 分钟桶（最多 1440 条 = 24 小时）
+            // 2.2.0 收口：保持「按分钟升序 + 每分钟唯一」的不变量（趋势页直接依赖它）。
+            long minute = unix - (unix % 60);
+            int minutePos = FindSampleMinute(target.samples, minute);
+            if (minutePos >= 0)
+            {
+                long[] bucket = target.samples[minutePos];
+                bucket[1] += deltaIn;
+                bucket[2] += deltaOut;
+            }
+            else
+            {
+                target.samples.Insert(~minutePos, new long[] { minute, deltaIn, deltaOut });
+            }
+            while (target.samples.Count > 1440) target.samples.RemoveAt(0);
+        }
+
+        static void PatchIpAggregates(DayData target, Dictionary<string, List<ConnEntry>> byIp,
+            Dictionary<string, long[]> perIpBytes, Dictionary<string, GeoInfo> geoMap,
+            long unix, double elapsed, bool precise, HashSet<string> wasActive)
+        {
+            if (target == null) return;
+            foreach (KeyValuePair<string, List<ConnEntry>> kv in byIp)
+            {
+                string ip = kv.Key;
+                List<ConnEntry> list = kv.Value;
+                IpAggregate a;
+                if (!target.ips.TryGetValue(ip, out a)) { a = new IpAggregate(); a.ip = ip; target.ips[ip] = a; }
+                a.sampleCount++;
+                a.connectedSeconds += (long)Math.Round(elapsed);
+                if (a.firstSeenUnix == 0)
+                {
+                    a.firstSeenUnix = unix;
+                    a.isNew = true;
+                }
+                a.lastSeenUnix = unix;
+                // 2.2.0：同一天内断线重连不算“新出现”；sessionCount 按天连续（跨小时文件也不重复计）。
+                if (wasActive == null || !wasActive.Contains(ip)) a.sessionCount++;
+                long[] b = perIpBytes[ip];
+                a.bytesIn += b[0];
+                a.bytesOut += b[1];
+                if (elapsed > 0)
+                {
+                    long ipInBps = (long)(b[0] / elapsed);
+                    long ipOutBps = (long)(b[1] / elapsed);
+                    if (ipInBps > a.peakInBps) a.peakInBps = ipInBps;
+                    if (ipOutBps > a.peakOutBps) a.peakOutBps = ipOutBps;
+                }
+                if (precise) a.bytesPrecise = true;
+                GeoInfo g;
+                if (geoMap.TryGetValue(ip, out g) && g != null && (g.Country.Length > 0 || g.City.Length > 0))
+                {
+                    a.city = g.City; a.region = g.Region; a.country = NormalizeCn(g.Country); a.isp = g.Isp;
+                    if (!string.IsNullOrEmpty(g.Host)) a.hostname = g.Host;
+                }
+                for (int j = 0; j < list.Count; j++)
+                {
+                    ConnEntry c = list[j];
+                    string pn = string.IsNullOrEmpty(c.ProcessName) ? "(未知)" : c.ProcessName;
+                    if (!a.processes.ContainsKey(pn)) a.processes[pn] = 0;
+                    a.processes[pn]++;
+                    if (!a.states.ContainsKey(c.State)) a.states[c.State] = 0;
+                    a.states[c.State]++;
+                    if (!a.ports.Contains(c.RemotePort)) a.ports.Add(c.RemotePort);
+                }
+            }
+        }
+
+        static void PatchProcAggregates(DayData target, Dictionary<string, List<ConnEntry>> byIp,
+            Dictionary<string, long[]> procBytes, Dictionary<string, long[]> procIpBytes,
+            Dictionary<string, GeoInfo> geoMap, long unix, Dictionary<string, ConnState> connStates)
+        {
+            if (target == null) return;
+            foreach (KeyValuePair<string, List<ConnEntry>> kv in byIp)
+            {
+                for (int j = 0; j < kv.Value.Count; j++)
+                {
+                    ConnEntry c = kv.Value[j];
+                    string pk = ProcKey(c);
+                    ProcAgg pa;
+                    if (!target.procs.TryGetValue(pk, out pa))
+                    {
+                        pa = new ProcAgg();
+                        pa.name = string.IsNullOrEmpty(c.ProcessName) ? "(未知)" : c.ProcessName;
+                        pa.path = c.ProcessPath;
+                        pa.pid = c.Pid;
+                        pa.processStartUnix = c.ProcessStartUnix;
+                        target.procs[pk] = pa;
+                    }
+                    if (pa.firstSeenUnix == 0) pa.firstSeenUnix = unix;
+                    pa.lastSeenUnix = unix;
+                    IpConnAgg ia;
+                    if (!pa.ips.TryGetValue(c.RemoteIp, out ia))
+                    {
+                        ia = new IpConnAgg();
+                        ia.ip = c.RemoteIp;
+                        ia.proto = c.Proto;
+                        ia.firstSeenUnix = unix;
+                        pa.ips[c.RemoteIp] = ia;
+                    }
+                    GeoInfo g;
+                    if (geoMap.TryGetValue(c.RemoteIp, out g) && g != null)
+                    {
+                        ia.city = g.City; ia.region = g.Region; ia.country = NormalizeCn(g.Country);
+                        ia.isp = g.Isp; ia.hostname = g.Host;
+                    }
+                    if (!ia.ports.Contains(c.RemotePort)) ia.ports.Add(c.RemotePort);
+                    ConnState cs;
+                    if (connStates.TryGetValue(ConnKey(c), out cs) && cs.FirstSeenUnix == unix)
+                    {
+                        ia.connCount++;
+                        pa.connCount++;
+                    }
+                }
+            }
+            foreach (KeyValuePair<string, long[]> kv in procBytes)
+            {
+                ProcAgg pa;
+                if (target.procs.TryGetValue(kv.Key, out pa))
+                {
+                    pa.bytesIn += kv.Value[0];
+                    pa.bytesOut += kv.Value[1];
+                }
+            }
+            foreach (KeyValuePair<string, long[]> kv in procIpBytes)
+            {
+                int bar = kv.Key.LastIndexOf('|');
+                if (bar <= 0) continue;
+                string pk = kv.Key.Substring(0, bar);
+                string ip = kv.Key.Substring(bar + 1);
+                ProcAgg pa;
+                if (!target.procs.TryGetValue(pk, out pa)) continue;
+                IpConnAgg ia;
+                if (!pa.ips.TryGetValue(ip, out ia)) continue;
+                ia.bytesIn += kv.Value[0];
+                ia.bytesOut += kv.Value[1];
             }
         }
 
@@ -733,14 +821,20 @@ namespace NetWatcher
         {
             lock (liveLock)
             {
-                try { Store.SaveDay(current); } catch { }
+                // 2.3.0：跨日先 flush 旧小时文件（当天聚合本来就写在各小时文件里），
+                // 再载入新一天已存在的小时文件（通常为空），并开新一天的小时会话。
+                try { if (currentHour != null) Store.SaveHour(currentHour.Clone()); } catch { }
                 current = Store.LoadDay(date);
+                if (current == null) current = new DayData { date = date };
+                current.date = date;
                 currentDate = date;
+                NormalizeSampleBuckets(current);
                 prevActiveIps.Clear();
                 connStates.Clear();
                 haveLastTotal = false;
                 lastSampleTime = DateTime.MinValue;
                 lastPersistUnix = 0;
+                try { BeginHourSession(); } catch { }
                 lock (historyLock) historyCache.Clear();
             }
         }
@@ -809,8 +903,8 @@ namespace NetWatcher
                     DayData cached;
                     if (!historyCache.TryGetValue(dt, out cached))
                     {
-                        DayData full = Store.LoadDay(dt);
-                        cached = full.SummaryOnly();
+                        // 2.3.0：历史页只读 .nwipdb 明文头（免 AES 解密），30 天量级也很快
+                        cached = Store.LoadDaySummary(dt);
                         historyCache[dt] = cached;
                     }
                     result.Add(cached);

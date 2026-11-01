@@ -500,19 +500,114 @@ namespace NetWatcher
             GeoInfo g2 = GeoIp.LookupSync("192.168.1.1");
             L("  GeoIP(192.168.1.1): " + g2.Display() + "  [来源:" + g2.Source + "]");
 
-            // 存储（2.1 修复 P0-2：在独立临时子目录里做往返测试，绝不覆盖 data\ 当天真实数据）
+            // 存储（2.3.0：加密小时文件 .nwipdb；2.1 修复 P0-2 延续：在独立临时子目录做往返测试，绝不覆盖 data\ 当天真实数据）
             L("");
-            L("--- 存储 ---");
+            L("--- 存储（加密小时文件 .nwipdb） ---");
             List<string> datesBefore = Store.ListDates();
             string stTestDir = Path.Combine(dataDir, "selftest-store");
+            int dataFilesBefore = 0;
+            try { dataFilesBefore = Directory.GetFiles(Path.Combine(dataDir, "data")).Length; } catch { }
             try
             {
                 try { if (Directory.Exists(stTestDir)) Directory.Delete(stTestDir, true); } catch { }
                 Store.Init(stTestDir);
-                DayData dd = new DayData { date = DateTime.Now.ToString("yyyy-MM-dd") };
-                bool saved = Store.SaveDay(dd);
-                DayData loaded = Store.LoadDay(dd.date);
-                L("  原子写/读: " + (saved && loaded != null && loaded.date == dd.date ? "OK" : "FAIL") + "（测试目录 selftest-store，未触碰 data\\）");
+                string dstr = DateTime.Now.ToString("yyyy-MM-dd");
+                long hs = Monitor.LocalHourStartUnix(DateTime.Now);
+                long ss = Monitor.NowUnix();
+                DayData hd = new DayData { date = dstr, hourStartUnix = hs, sessionStartUnix = ss };
+                hd.bytesIn = 123456; hd.bytesOut = 65432;
+                hd.peakInBps = 1111; hd.peakOutBps = 2222;
+                hd.sampleCount = 3; hd.bytesPrecise = true;
+                hd.firstSampleUnix = ss; hd.lastSampleUnix = ss + 120;
+                hd.samples.Add(new long[] { ss - (ss % 60), 100, 20 });
+                hd.samples.Add(new long[] { ss - (ss % 60) + 60, 200, 30 });
+                IpAggregate agg = new IpAggregate { ip = "203.0.113.9", bytesIn = 1000, bytesOut = 200, sampleCount = 2, sessionCount = 1 };
+                agg.firstSeenUnix = ss; agg.lastSeenUnix = ss + 60;
+                hd.ips["203.0.113.9"] = agg;
+                ProcAgg pagg = new ProcAgg { name = "selftest.exe", pid = 4242, path = "C:\\selftest.exe" };
+                IpConnAgg iagg = new IpConnAgg { ip = "203.0.113.9", bytesIn = 1000, bytesOut = 200, connCount = 1 };
+                iagg.firstSeenUnix = ss;
+                pagg.ips["203.0.113.9"] = iagg;
+                pagg.firstSeenUnix = ss; pagg.lastSeenUnix = ss + 60;
+                hd.procs["selftest.exe|4242|0"] = pagg;
+
+                bool savedHour = Store.SaveHour(hd);
+                string[] nwFiles = Directory.GetFiles(Path.Combine(stTestDir, "data"), "*" + Store.HourFileSuffix);
+                string hourFile = nwFiles.Length > 0 ? nwFiles[0] : "";
+                DayData backHour = Store.LoadDay(dstr);
+                bool rt = savedHour && hourFile.Length > 0 && backHour != null
+                    && backHour.bytesIn == hd.bytesIn && backHour.bytesOut == hd.bytesOut
+                    && backHour.sampleCount == hd.sampleCount
+                    && backHour.ips.ContainsKey("203.0.113.9") && backHour.procs.Count == 1;
+                byte[] hb = null;
+                try { if (hourFile.Length > 0) hb = File.ReadAllBytes(hourFile); } catch { }
+                bool looksEncrypted = hb != null && hb.Length > 96
+                    && hb[0] == (byte)'N' && hb[1] == (byte)'W' && hb[2] == (byte)'I' && hb[3] == (byte)'P'
+                    && hb[4] == (byte)'D' && hb[5] == (byte)'B' && hb[6] == (byte)'0' && hb[7] == (byte)'1';
+                bool noPlainIp = hb != null
+                    && Encoding.ASCII.GetString(hb).IndexOf("203.0.113.9", StringComparison.Ordinal) < 0
+                    && Encoding.ASCII.GetString(hb).IndexOf("\"ips\"", StringComparison.Ordinal) < 0;
+                L("  小时文件加密往返: " + (rt ? "OK" : "FAIL") + "  文件=" + Path.GetFileName(hourFile) + "  大小=" + (hb == null ? 0 : hb.Length) + "B");
+                L("  加密性（二进制 magic=NWIPDB01 / 无明文 IP）: " + ((looksEncrypted && noPlainIp) ? "OK" : "FAIL"));
+                L("  明文头快速摘要: 下载=" + Store.LoadDaySummary(dstr).bytesIn + " 采样=" + Store.LoadDaySummary(dstr).sampleCount);
+
+                // legacy JSON 迁移：合成旧明文日文件 → 加密 legacy 块 → 回读校验 → 删除明文
+                string legacyDate = DateTime.Now.AddDays(-1).ToString("yyyy-MM-dd");
+                DayData old = new DayData { date = legacyDate, bytesIn = 987654, bytesOut = 123456, peakInBps = 77, peakOutBps = 88, sampleCount = 5 };
+                old.ips["198.51.100.7"] = new IpAggregate { ip = "198.51.100.7", bytesIn = 987654, bytesOut = 123456 };
+                string legacyJson = Store.DataPath(legacyDate);
+                bool wroteJson = Store.SaveDay(old);
+                int migrated = Store.MigrateLegacyOnce();
+                bool jsonGone = !File.Exists(legacyJson);
+                DayData legacyBack = Store.LoadDay(legacyDate);
+                bool migOk = wroteJson && migrated >= 1 && jsonGone && legacyBack != null
+                    && legacyBack.bytesIn == old.bytesIn && legacyBack.bytesOut == old.bytesOut
+                    && legacyBack.ips.Count == 1;
+                string[] legacyFiles = Directory.GetFiles(Path.Combine(stTestDir, "data"), "*legacy*" + Store.HourFileSuffix);
+                L("  legacy JSON 迁移: " + (migOk ? "OK" : "FAIL") + "（迁移 " + migrated + " 个，原 JSON 已删=" + jsonGone
+                    + "，回读汇总=" + (legacyBack == null ? "null" : legacyBack.bytesIn + "/" + legacyBack.bytesOut)
+                    + "，legacy 文件数=" + legacyFiles.Length + "）");
+
+                // H7 性能（合成数据，全部写在 selftest-store；供 QA 引用）：
+                // 1) 一天 24 个小时文件的解密合并耗时；2) 历史页 30 天首载（只读明文头、免 AES 解密）耗时
+                string perfDate = DateTime.Now.AddDays(-2).ToString("yyyy-MM-dd");
+                long perfDayStart = Monitor.LocalDayStartUnix(DateTime.Now.AddDays(-2).Date);
+                for (int h = 0; h < 24; h++)
+                {
+                    DayData ph = new DayData { date = perfDate, hourStartUnix = perfDayStart + h * 3600L, sessionStartUnix = ss };
+                    ph.bytesIn = 1000L * (h + 1);
+                    ph.bytesOut = 100L * (h + 1);
+                    ph.peakInBps = 100L + h;
+                    ph.peakOutBps = 50L + h;
+                    ph.sampleCount = 60;
+                    ph.firstSampleUnix = perfDayStart + h * 3600L;
+                    ph.lastSampleUnix = ph.firstSampleUnix + 3540;
+                    for (int m = 0; m < 60; m++) ph.samples.Add(new long[] { perfDayStart + h * 3600L + m * 60L, 100L + h, 20L + h });
+                    IpAggregate pag = new IpAggregate { ip = "203.0.113." + (10 + h), bytesIn = 1000L * (h + 1), bytesOut = 100L * (h + 1), sampleCount = 60, sessionCount = 1 };
+                    pag.firstSeenUnix = ph.firstSampleUnix; pag.lastSeenUnix = ph.lastSampleUnix;
+                    ph.ips[pag.ip] = pag;
+                    Store.SaveHour(ph);
+                }
+                Stopwatch swMerge = Stopwatch.StartNew();
+                DayData merged = Store.LoadDay(perfDate);
+                swMerge.Stop();
+                L("  小时文件合并 24 文件: " + swMerge.ElapsedMilliseconds + " ms（下载=" + merged.bytesIn + "，采样=" + merged.sampleCount + "，IP=" + merged.ips.Count + "）");
+
+                for (int d = 0; d < 30; d++)
+                {
+                    string histDate = DateTime.Now.AddDays(-3 - d).ToString("yyyy-MM-dd");
+                    long histDayStart = Monitor.LocalDayStartUnix(DateTime.Now.AddDays(-3 - d).Date);
+                    DayData dh = new DayData { date = histDate, hourStartUnix = histDayStart, sessionStartUnix = ss };
+                    dh.bytesIn = 5000 + d; dh.bytesOut = 500 + d; dh.peakInBps = 10; dh.peakOutBps = 5; dh.sampleCount = 10;
+                    dh.ips["198.51.100." + (d % 200 + 1)] = new IpAggregate { ip = "198.51.100.x", bytesIn = dh.bytesIn, bytesOut = dh.bytesOut };
+                    Store.SaveHour(dh);
+                }
+                Stopwatch swHist = Stopwatch.StartNew();
+                List<string> histDates = Store.ListDates();
+                for (int i = 0; i < histDates.Count; i++) Store.LoadDaySummary(histDates[i]);
+                swHist.Stop();
+                L("  历史概览 30 天首载: " + swHist.ElapsedMilliseconds + " ms（" + histDates.Count + " 天，仅读明文头免解密）");
+                L("  selftest 迁移策略: 不触碰真实 data\\（legacy 迁移只在 GUI/daemon 拿到数据写锁后由 Monitor 构造调用）");
             }
             catch (Exception stEx) { L("  存储自检异常: " + stEx.Message); }
             finally
@@ -520,6 +615,10 @@ namespace NetWatcher
                 try { Store.Init(dataDir); } catch { }
                 try { if (Directory.Exists(stTestDir)) Directory.Delete(stTestDir, true); } catch { }
             }
+            int dataFilesAfter = 0;
+            try { dataFilesAfter = Directory.GetFiles(Path.Combine(dataDir, "data")).Length; } catch { }
+            L("  真实 data\\ 未被 selftest 改写: " + (dataFilesBefore == dataFilesAfter ? "OK" : "FAIL")
+                + "（文件数 " + dataFilesBefore + "→" + dataFilesAfter + "）");
             L("  已存在日期文件: " + string.Join(", ", datesBefore.ToArray()));
 
             // 开机自启（2.1 修复 P0-3：只测临时值名，不触碰真实自启项）
