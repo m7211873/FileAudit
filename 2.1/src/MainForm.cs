@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Text;
@@ -17,6 +18,8 @@ namespace NetWatcher
     public class MainForm : Form
     {
         const string DateFmt = "yyyy-MM-dd";
+        // 2.2.0 收口：趋势页相邻分钟桶间隔 > 5 分钟视为程序未运行 → 曲线断开不连线
+        const int TrendGapMinutes = 5;
 
         [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
         static extern int RegisterWindowMessage(string message);
@@ -91,9 +94,15 @@ namespace NetWatcher
         TabPage tpTrend;
         Label lblTrendSummary;
         Panel trendPanel;
-        DayData trendDay;
-        string trendDayDate = "";
         DateTime lastTrendRebind = DateTime.MinValue;
+        // 2.2.0 收口：趋势页归一化数据 / 悬停状态 / 缓存的 GDI 资源
+        // trendPoints 每项 = [分钟序号 0..1439, 该分钟下载字节, 该分钟上传字节]，已按分钟升序且唯一
+        List<long[]> trendPoints;
+        long trendDayStartUnix;                 // 当日本地 0 点 unix（悬停读数换算 HH:mm 用）
+        int trendHoverIndex = -1;               // 悬停命中的 trendPoints 下标；-1 = 不画十字线
+        int trendDupMerged;                     // 归一化时合并掉的重复分钟数（写进标题便于排查脏数据）
+        int trendDroppedOutOfDay;               // 归一化时丢弃的跨日/异常分钟数
+        TrendGdiCache trendGdi;
 
         // ---------------- 日期行 / 活动筛选（2.2.0） ----------------
         Control dateRow;
@@ -102,6 +111,7 @@ namespace NetWatcher
         ComboBox cboActivity;
         int filtMode;
         HashSet<string> filtEst, filtLong, filtTop;
+        DateTime dateRowToday = DateTime.MinValue;   // 2.2.0 收口：上次刷新日期行时的“今天”，用于跨日自动刷新
 
         // ---------------- 排序状态 ----------------
         sealed class SortSpec
@@ -312,6 +322,17 @@ namespace NetWatcher
             toolTip = new ToolTip();
             toolTip.AutoPopDelay = 15000;
             toolTip.ShowAlways = true;
+            // 2.2.0 收口：把筛选语义写进悬停提示（尤其「当前速度 Top20」不是历史累计、「仅公网」与 ShowLocalIp 的关系）
+            if (cboActivity != null)
+            {
+                toolTip.SetToolTip(cboActivity,
+                    "活动筛选（与搜索/双击 IP 筛选叠加）：\n" +
+                    "· 今天新出现（NEW）：当前日期（本地日界）里首次出现的 IP，重启后按当天数据重建\n" +
+                    "· 仅活跃：至少有一条 ESTABLISHED 连接\n" +
+                    "· 当前速度 Top20：按本次采样速率（↓B/s + ↑B/s）取前 20 个 IP，不是历史累计\n" +
+                    "· 仅公网 IP：排除内网/本机地址；设置里关闭「显示内网地址」时该项与「全部」等效\n" +
+                    "· 长连接 >60 秒：该 IP 至少有一条已持续超过 60 秒的连接");
+            }
 
             InitGridColumns();
             ResumeLayout(true);
@@ -397,11 +418,13 @@ namespace NetWatcher
             // 2.2.0：实时连接页用「活动筛选」替代日期行（日期在实时页本来就没有意义）
             cboActivity = new ComboBox();
             cboActivity.DropDownStyle = ComboBoxStyle.DropDownList;
-            cboActivity.Width = 180;
+            cboActivity.Width = 214;
             cboActivity.Margin = new Padding(0, 4, 8, 0);
+            // 2.2.0 收口：第 4 项由「大流量 Top20」改为「当前速度 Top20」——按本采样速率排序，避免被理解为历史累计；
+            // 第 2 项「今天新出现」语义见 Monitor.cs isNew 注释（按本地日界的当天数据判定）。
             cboActivity.Items.AddRange(new object[] {
                 "活动筛选：全部", "活动筛选：今天新出现（NEW）", "活动筛选：仅活跃（ESTABLISHED）",
-                "活动筛选：大流量 Top20", "活动筛选：仅公网 IP", "活动筛选：长连接（>60 秒）" });
+                "活动筛选：当前速度 Top20", "活动筛选：仅公网 IP", "活动筛选：长连接（>60 秒）" });
             cboActivity.SelectedIndex = 0;
             cboActivity.Visible = false;
             cboActivity.SelectedIndexChanged += delegate { RebindActiveTab(true); };
@@ -431,7 +454,8 @@ namespace NetWatcher
             datePicker.CustomFormat = "yyyy-MM-dd";
             datePicker.Width = 120;
             datePicker.Margin = new Padding(6, 4, 0, 0);
-            datePicker.Value = DateTime.Now;
+            // 2.2.0 收口：初值用「今天 0 点」，与 UpdateDateBar 里的 MaxDate=今天 保持一致，避免首次钳位触发 ValueChanged
+            datePicker.Value = DateTime.Now.Date;
             datePicker.ValueChanged += delegate
             {
                 if (!inSetDate) SetDate(datePicker.Value);
@@ -778,11 +802,7 @@ namespace NetWatcher
                 if (e.RowIndex < 0 || e.RowIndex >= dgvHist.Rows.Count) return;
                 string d = Convert.ToString(dgvHist.Rows[e.RowIndex].Cells["date"].Value);
                 DateTime dt;
-                if (DateTime.TryParse(d, out dt))
-                {
-                    if (tabs != null) tabs.SelectedTab = tpDate;
-                    SetDate(dt);
-                }
+                if (DateTime.TryParse(d, out dt)) JumpToDate(dt);
             };
             tl.Controls.Add(dgvHist, 0, 1);
 
@@ -800,28 +820,59 @@ namespace NetWatcher
                 bool live = (tabs != null && tabs.SelectedTab == tpLive);
                 bool showDate = !live;
                 Control[] dateCtrls = new Control[] { lblDateLabel, btnToday, btnYesterday, btnDayBefore, datePicker, sepDate };
-                for (int i = 0; i < dateCtrls.Length; i++) if (dateCtrls[i] != null) dateCtrls[i].Visible = showDate;
-                if (cboActivity != null) cboActivity.Visible = live;
-                if (!showDate) { dateRow.PerformLayout(); return; }
-
-                DateTime today = DateTime.Now.Date;
-                List<string> dates = new List<string>();
-                try { dates = Store.ListDates(); } catch { }
-                Button[] bs = new Button[] { btnToday, btnYesterday, btnDayBefore };
-                DateTime[] ds = new DateTime[] { today, today.AddDays(-1), today.AddDays(-2) };
-                string sel = selectedDate;
-                for (int i = 0; i < bs.Length; i++)
+                // 2.2.0 收口：显隐切换必须在 Suspend/ResumeLayout 里做并强制重排，
+                // 否则 FlowLayoutPanel 隐藏→显示后可能保留旧位置（控件错位/重叠/被截断）。
+                dateRow.SuspendLayout();
+                try
                 {
-                    if (bs[i] == null) continue;
-                    string dsStr = ds[i].ToString(DateFmt);
-                    bool has = dates.Contains(dsStr);
-                    bs[i].Enabled = has || sel == dsStr;
-                    bs[i].BackColor = (sel == dsStr) ? Color.FromArgb(208, 226, 248) : SystemColors.Control;
+                    for (int i = 0; i < dateCtrls.Length; i++) if (dateCtrls[i] != null) dateCtrls[i].Visible = showDate;
+                    if (cboActivity != null) cboActivity.Visible = live;
+                    if (showDate) ApplyDateBarState();
                 }
-                if (datePicker != null) datePicker.MaxDate = DateTime.Now.Date;
+                finally
+                {
+                    dateRow.ResumeLayout(true);
+                }
                 dateRow.PerformLayout();
+                Control parent = dateRow.Parent;
+                if (parent != null) parent.PerformLayout();
             }
             catch { }
+        }
+
+        // 2.2.0 收口：日期行状态（今天恒可选 / 无数据置灰 / 选中高亮 / 日历禁未来 / 跨日刷新）
+        void ApplyDateBarState()
+        {
+            DateTime today = DateTime.Now.Date;
+            dateRowToday = today;
+            List<string> dates = new List<string>();
+            try { dates = Store.ListDates(); } catch { }
+            Button[] bs = new Button[] { btnToday, btnYesterday, btnDayBefore };
+            DateTime[] ds = new DateTime[] { today, today.AddDays(-1), today.AddDays(-2) };
+            string sel = selectedDate;
+            for (int i = 0; i < bs.Length; i++)
+            {
+                if (bs[i] == null) continue;
+                string dsStr = ds[i].ToString(DateFmt);
+                bool has = dates.Contains(dsStr);
+                // 2.2.0 收口：「今天」恒可选——当天数据可能只在内存里、还没落盘（刚启动/跨日），置灰会让人以为今天没数据。
+                bs[i].Enabled = (i == 0) || has || sel == dsStr;
+                bs[i].BackColor = (sel == dsStr) ? Color.FromArgb(208, 226, 248) : SystemColors.Control;
+            }
+            if (datePicker != null)
+            {
+                bool old = inSetDate;
+                inSetDate = true;   // MaxDate 变小时可能连带钳位 Value，必须屏蔽 ValueChanged 重入
+                try
+                {
+                    if (datePicker.MaxDate.Date != today) datePicker.MaxDate = today;
+                }
+                catch { }
+                finally
+                {
+                    inSetDate = old;
+                }
+            }
         }
 
         string DateLabel(string date)
@@ -851,7 +902,7 @@ namespace NetWatcher
             int i = ActivityFilter;
             if (i == 1) return "今天新出现";
             if (i == 2) return "仅活跃连接";
-            if (i == 3) return "大流量 Top20";
+            if (i == 3) return "当前速度 Top20";
             if (i == 4) return "仅公网 IP";
             if (i == 5) return "长连接 >60s";
             return "";
@@ -881,6 +932,25 @@ namespace NetWatcher
             return true;
         }
 
+        // 2.2.0 收口：空结果可读反馈——复用标题栏既有文案机制（不新造 UI/空态控件），
+        // 讲清"为什么没数据 + 怎么恢复"，避免用户以为程序坏了。
+        string BuildLiveEmptyHint(string q, bool hasSnapshot)
+        {
+            if (!hasSnapshot) return "    ·    正在等待首次采样…";
+            StringBuilder sb = new StringBuilder("    ·    无匹配结果");
+            List<string> why = new List<string>();
+            string fname = ActivityFilterName();
+            if (fname.Length > 0) why.Add("活动筛选「" + fname + "」");
+            if (q.Length > 0) why.Add("搜索「" + q + "」");
+            if (pinnedIp.Length > 0) why.Add("IP 筛选「" + pinnedIp + "」");
+            if (cfg != null && !cfg.ShowLocalIp) why.Add("设置已隐藏内网/本机地址");
+            if (why.Count > 0) sb.Append("（当前条件：").Append(string.Join("、", why.ToArray())).Append("）");
+            if (filtMode == 4 && cfg != null && !cfg.ShowLocalIp)
+                sb.Append("；「仅公网」与「全部」等效（内网地址已被设置隐藏），无副作用");
+            sb.Append("；切回「全部」/清空搜索/点「刷新」即可恢复");
+            return sb.ToString();
+        }
+
         // =============================================================
         // 趋势页（2.2.0）：用 samples 分钟桶画 24 小时上下行曲线
         // =============================================================
@@ -903,12 +973,99 @@ namespace NetWatcher
             trendPanel.Dock = DockStyle.Fill;
             trendPanel.BackColor = Color.White;
             trendPanel.BorderStyle = BorderStyle.FixedSingle;
+            trendPanel.Cursor = Cursors.Cross;
             EnableDoubleBuffer(trendPanel);
             trendPanel.Paint += delegate(object s, PaintEventArgs e) { DrawTrend(e.Graphics, trendPanel.ClientSize); };
             trendPanel.Resize += delegate { try { trendPanel.Invalidate(); } catch { } };
+            // 2.2.0 收口：鼠标悬停 → 十字线 + 最近分钟读数
+            trendPanel.MouseMove += TrendMouseMove;
+            trendPanel.MouseLeave += delegate { ClearTrendHover(); };
             tl.Controls.Add(trendPanel, 0, 1);
 
             tpTrend.Controls.Add(tl);
+        }
+
+        // 2.2.0 收口：samples 语义（见 Storage.cs 的 DayData.samples 与 Monitor.Sample 分钟桶）
+        //   每项 = [该分钟起点 unix, 该分钟内累计下载字节, 该分钟内累计上传播字节]；
+        //   Monitor 正常写入时就地累加同一分钟、按采样时间顺序追加，最多 1440 条。
+        // 绘制前统一归一化（防御历史数据 / 系统时钟回拨 / 手工造的数据）：
+        //   1) 按本地日界换算成分钟序号 0..1439，跨日（负值或 >1439）项丢弃；
+        //   2) 同一分钟出现多条时求和合并（每条都代表该分钟的字节，求和不会丢字节）；
+        //   3) 按分钟序号升序排序（Monitor 正常写入即升序唯一，这里只是兜底）。
+        static List<long[]> BuildTrendSeries(DayData d, long dayStartUnix, out int rawValid, out int dupMerged, out int droppedOutOfDay)
+        {
+            rawValid = 0; dupMerged = 0; droppedOutOfDay = 0;
+            List<long[]> result = new List<long[]>();
+            if (d == null || d.samples == null || d.samples.Count == 0) return result;
+
+            Dictionary<int, long[]> byMinute = new Dictionary<int, long[]>();
+            List<int> order = new List<int>();
+            for (int i = 0; i < d.samples.Count; i++)
+            {
+                long[] s = d.samples[i];
+                if (s == null || s.Length < 3) continue;
+                rawValid++;
+                if (s[0] < dayStartUnix)
+                {
+                    droppedOutOfDay++;
+                    continue;
+                }
+                int minute = (int)((s[0] - dayStartUnix) / 60);
+                if (minute < 0 || minute > 1439)
+                {
+                    droppedOutOfDay++;
+                    continue;
+                }
+                long vIn = s[1] > 0 ? s[1] : 0;
+                long vOut = s[2] > 0 ? s[2] : 0;
+                long[] cur;
+                if (byMinute.TryGetValue(minute, out cur))
+                {
+                    cur[1] += vIn;
+                    cur[2] += vOut;
+                    dupMerged++;
+                }
+                else
+                {
+                    byMinute[minute] = new long[] { minute, vIn, vOut };
+                    order.Add(minute);
+                }
+            }
+            order.Sort();
+            for (int i = 0; i < order.Count; i++) result.Add(byMinute[order[i]]);
+            return result;
+        }
+
+        // 2.2.0 收口：相邻分钟桶间隔 > TrendGapMinutes 认为程序没在运行，曲线断开不连线
+        static List<List<long[]>> BuildTrendSegments(List<long[]> pts)
+        {
+            List<List<long[]>> segs = new List<List<long[]>>();
+            if (pts == null || pts.Count == 0) return segs;
+            List<long[]> cur = null;
+            long prevMinute = 0;
+            for (int i = 0; i < pts.Count; i++)
+            {
+                long[] p = pts[i];
+                if (cur == null || p[0] - prevMinute > TrendGapMinutes)
+                {
+                    cur = new List<long[]>();
+                    segs.Add(cur);
+                }
+                cur.Add(p);
+                prevMinute = p[0];
+            }
+            return segs;
+        }
+
+        static int CountTrendSegments(List<long[]> pts)
+        {
+            if (pts == null || pts.Count == 0) return 0;
+            int n = 1;
+            for (int i = 1; i < pts.Count; i++)
+            {
+                if (pts[i][0] - pts[i - 1][0] > TrendGapMinutes) n++;
+            }
+            return n;
         }
 
         void RebindTrend()
@@ -916,138 +1073,379 @@ namespace NetWatcher
             if (lblTrendSummary == null || trendPanel == null) return;
             string date = selectedDate;
             DayData d = SafeGetDay(date);
-            trendDay = d;
-            trendDayDate = date;
-            if (d == null)
+            trendDayStartUnix = DayStartUnix(date);
+            int raw = 0;
+            trendPoints = BuildTrendSeries(d, trendDayStartUnix, out raw, out trendDupMerged, out trendDroppedOutOfDay);
+            trendHoverIndex = -1;
+            if (trendPoints.Count == 0)
             {
-                lblTrendSummary.Text = "趋势 · " + date + "（无数据）";
+                lblTrendSummary.Text = "趋势 · " + DateLabel(date)
+                    + "（无数据：该日期没有可绘制的分钟采样，程序需在该日运行满 1 分钟并已落盘）";
                 trendPanel.Invalidate();
                 return;
             }
+
             long sumIn = 0, sumOut = 0, peakIn = 0, peakOut = 0;
-            int n = 0;
-            if (d.samples != null)
+            for (int i = 0; i < trendPoints.Count; i++)
             {
-                foreach (long[] s in d.samples)
-                {
-                    if (s == null || s.Length < 3) continue;
-                    n++;
-                    sumIn += s[1]; sumOut += s[2];
-                    if (s[1] > peakIn) peakIn = s[1];
-                    if (s[2] > peakOut) peakOut = s[2];
-                }
+                long[] p = trendPoints[i];
+                sumIn += p[1]; sumOut += p[2];
+                if (p[1] > peakIn) peakIn = p[1];
+                if (p[2] > peakOut) peakOut = p[2];
             }
-            lblTrendSummary.Text = "趋势 · " + DateLabel(date)
-                + "    ·    当日总量 ↓" + FmtBytes(d.bytesIn) + " ↑" + FmtBytes(d.bytesOut)
-                + "    ·    分钟桶 " + n + " 条（每分钟一根）"
-                + "    ·    峰值/分钟 ↓" + FmtBytes(peakIn) + " ↑" + FmtBytes(peakOut)
-                + "    ·    平均/分钟 ↓" + FmtBytes(n > 0 ? sumIn / n : 0) + " ↑" + FmtBytes(n > 0 ? sumOut / n : 0);
+            int segCount = CountTrendSegments(trendPoints);
+            StringBuilder sb = new StringBuilder();
+            sb.Append("趋势 · ").Append(DateLabel(date));
+            sb.Append("    ·    当日总量 ↓").Append(FmtBytes(d.bytesIn)).Append(" ↑").Append(FmtBytes(d.bytesOut));
+            sb.Append("    ·    分钟桶 ").Append(trendPoints.Count).Append(" 条");
+            if (raw != trendPoints.Count) sb.Append("（原始 ").Append(raw).Append(" 条，已归并/过滤）");
+            if (trendDupMerged > 0) sb.Append("（合并重复 ").Append(trendDupMerged).Append(" 条）");
+            if (trendDroppedOutOfDay > 0) sb.Append("（忽略跨日/异常 ").Append(trendDroppedOutOfDay).Append(" 条）");
+            // 真实峰值保留在标题里（Y 轴只做“好看的取整上限”，不篡改峰值语义）
+            sb.Append("    ·    峰值/分钟 ↓").Append(FmtBytes(peakIn)).Append(" ↑").Append(FmtBytes(peakOut));
+            sb.Append("    ·    平均/分钟 ↓").Append(FmtBytes(sumIn / trendPoints.Count)).Append(" ↑").Append(FmtBytes(sumOut / trendPoints.Count));
+            sb.Append("    ·    曲线 ").Append(segCount).Append(" 段（空档 >").Append(TrendGapMinutes).Append(" 分钟断开）");
+            sb.Append("    ·    鼠标悬停查看该分钟读数");
+            lblTrendSummary.Text = sb.ToString();
             trendPanel.Invalidate();
         }
 
         static long DayStartUnix(string date)
         {
             DateTime dt;
-            if (!DateTime.TryParse(date, out dt)) dt = DateTime.Today;
-            DateTime local = dt.Date;
-            DateTime utc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(local, DateTimeKind.Unspecified));
-            return (long)(utc - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+            if (!DateTime.TryParseExact(date, DateFmt, CultureInfo.InvariantCulture, DateTimeStyles.None, out dt))
+                dt = DateTime.Today;
+            return Monitor.LocalDayStartUnix(dt);
+        }
+
+        // 2.2.0 收口：GDI 资源缓存到字段（每次 Paint new Font/Pen 会产生大量临时对象）
+        sealed class TrendGdiCache : IDisposable
+        {
+            public readonly Font AxisFont = new Font("Microsoft YaHei", 8F);
+            public readonly Font LegendFont = new Font("Microsoft YaHei", 8.5F);
+            public readonly Font MsgFont = new Font("Microsoft YaHei", 10F);
+            public readonly Font HintFont = new Font("Microsoft YaHei", 8F);
+            public readonly Font TipFont = new Font("Microsoft YaHei", 9F);
+            public readonly Pen GridPen = new Pen(Color.FromArgb(226, 232, 240), 1);
+            public readonly Pen InPen = new Pen(Color.FromArgb(46, 110, 200), 2);
+            public readonly Pen OutPen = new Pen(Color.FromArgb(220, 120, 32), 2);
+            public readonly Pen CrossPen = new Pen(Color.FromArgb(120, 130, 145), 1);
+            public readonly Pen TipBorderPen = new Pen(Color.FromArgb(150, 160, 175), 1);
+            public readonly Pen HoverRingPen = new Pen(Color.White, 1.5F);
+            public readonly SolidBrush TextBrush = new SolidBrush(Color.Gray);
+            public readonly SolidBrush HintBrush = new SolidBrush(Color.DimGray);
+            public readonly SolidBrush InBrush = new SolidBrush(Color.FromArgb(46, 110, 200));
+            public readonly SolidBrush OutBrush = new SolidBrush(Color.FromArgb(220, 120, 32));
+            public readonly SolidBrush TipBgBrush = new SolidBrush(Color.FromArgb(255, 255, 255));
+            public readonly SolidBrush TipShadowBrush = new SolidBrush(Color.FromArgb(224, 229, 236));
+            public readonly SolidBrush TipTextBrush = new SolidBrush(Color.FromArgb(40, 45, 55));
+
+            public TrendGdiCache()
+            {
+                CrossPen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
+            }
+
+            public void Dispose()
+            {
+                try { AxisFont.Dispose(); } catch { }
+                try { LegendFont.Dispose(); } catch { }
+                try { MsgFont.Dispose(); } catch { }
+                try { HintFont.Dispose(); } catch { }
+                try { TipFont.Dispose(); } catch { }
+                try { GridPen.Dispose(); } catch { }
+                try { InPen.Dispose(); } catch { }
+                try { OutPen.Dispose(); } catch { }
+                try { CrossPen.Dispose(); } catch { }
+                try { TipBorderPen.Dispose(); } catch { }
+                try { HoverRingPen.Dispose(); } catch { }
+                try { TextBrush.Dispose(); } catch { }
+                try { HintBrush.Dispose(); } catch { }
+                try { InBrush.Dispose(); } catch { }
+                try { OutBrush.Dispose(); } catch { }
+                try { TipBgBrush.Dispose(); } catch { }
+                try { TipShadowBrush.Dispose(); } catch { }
+                try { TipTextBrush.Dispose(); } catch { }
+            }
+        }
+
+        void DisposeTrendResources()
+        {
+            try
+            {
+                if (trendGdi != null) { trendGdi.Dispose(); trendGdi = null; }
+            }
+            catch { }
+        }
+
+        // 2.2.0 收口：趋势绘图区（上留图例、左留 Y 轴标签、下留时间轴标签）
+        static bool TrendPlotRect(Size size, out int left, out int top, out int w, out int h)
+        {
+            left = 72; top = 26;
+            w = size.Width - left - 20;
+            h = size.Height - top - 36;
+            return w >= 60 && h >= 40;
+        }
+
+        // 2.2.0 收口：Y 轴上界取整（1/2/2.5/5 × 10^n，按 KB/MB/GB 二进制单位取整）。
+        // 保证返回上限 >= peak（曲线不会被截断），真实峰值仍显示在标题里。
+        static double NiceTrendAxis(long peakBytes, int ticks, out double step)
+        {
+            step = 1;
+            if (ticks < 1) ticks = 1;
+            if (peakBytes <= 0) return ticks;   // 全 0：0..ticks 字节的平凡轴
+            double[] scales = new double[] { 1, 1024, 1024.0 * 1024, 1024.0 * 1024 * 1024, 1024.0 * 1024 * 1024 * 1024 };
+            int si = 0;
+            while (si < scales.Length - 1 && peakBytes / scales[si] >= 1024) si++;
+            double unit = scales[si];
+            double target = peakBytes / unit / ticks;
+            if (target < 1e-9) target = 1e-9;
+            double exp = Math.Pow(10, Math.Floor(Math.Log10(target)));
+            double mant = target / exp;
+            double nice;
+            if (mant <= 1) nice = 1;
+            else if (mant <= 2) nice = 2;
+            else if (mant <= 2.5) nice = 2.5;
+            else if (mant <= 5) nice = 5;
+            else nice = 10;
+            step = nice * exp * unit;
+            if (step < 1) step = 1;
+            return step * ticks;
         }
 
         void DrawTrend(Graphics g, Size size)
         {
             try
             {
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                g.Clear(Color.White);
-                int left = 64, right = 16, top = 18, bottom = 34;
-                int w = size.Width - left - right;
-                int h = size.Height - top - bottom;
-                if (w < 60 || h < 40) return;
+                if (trendGdi == null) trendGdi = new TrendGdiCache();
+                DrawTrendCore(g, size, trendPoints, trendDayStartUnix, trendHoverIndex, trendGdi);
+            }
+            catch { }
+        }
 
-                DayData d = trendDay;
-                long maxVal = 1;
-                int count = 0;
-                if (d != null && d.samples != null)
+        static void DrawTrendCore(Graphics g, Size size, List<long[]> pts, long dayStartUnix, int hoverIndex, TrendGdiCache gdi)
+        {
+            g.Clear(Color.White);
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            try { g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit; } catch { }
+
+            int left, top, w, h;
+            if (!TrendPlotRect(size, out left, out top, out w, out h)) return;
+
+            long peak = 0;
+            if (pts != null)
+            {
+                for (int i = 0; i < pts.Count; i++)
                 {
-                    foreach (long[] s in d.samples)
-                    {
-                        if (s == null || s.Length < 3) continue;
-                        count++;
-                        if (s[1] > maxVal) maxVal = s[1];
-                        if (s[2] > maxVal) maxVal = s[2];
-                    }
+                    if (pts[i][1] > peak) peak = pts[i][1];
+                    if (pts[i][2] > peak) peak = pts[i][2];
                 }
+            }
+            double yStep;
+            double yMax = NiceTrendAxis(peak, 4, out yStep);
 
-                using (Pen grid = new Pen(Color.FromArgb(226, 232, 240), 1))
-                using (Font f8 = new Font("Microsoft YaHei", 8F))
-                using (SolidBrush bgray = new SolidBrush(Color.Gray))
+            // 水平网格 + Y 轴标签（每秒/月字节，单位/分；上限是取整值，不是原始峰值）
+            for (int i = 0; i <= 4; i++)
+            {
+                int y = top + h - (int)Math.Round((double)h * i / 4.0);
+                g.DrawLine(gdi.GridPen, left, y, left + w, y);
+                string lab = FmtBytes((long)Math.Round(yStep * i)) + "/分";
+                SizeF ls = g.MeasureString(lab, gdi.AxisFont);
+                float lx = left - 6 - ls.Width;
+                if (lx < 2) lx = 2;
+                g.DrawString(lab, gdi.AxisFont, gdi.TextBrush, new PointF(lx, y - ls.Height / 2f));
+            }
+            // 垂直网格 + X 轴标签（0..24 点，与分钟序号 0..1440 对齐）
+            for (int hour = 0; hour <= 24; hour += 3)
+            {
+                int x = left + (int)Math.Round((double)w * hour / 24.0);
+                g.DrawLine(gdi.GridPen, x, top, x, top + h);
+                string lab = (hour == 24 ? "24:00" : hour + ":00");
+                SizeF ls = g.MeasureString(lab, gdi.AxisFont);
+                float lx = x - ls.Width / 2f;
+                if (lx < 2) lx = 2;
+                if (lx + ls.Width > size.Width - 2) lx = size.Width - 2 - ls.Width;
+                g.DrawString(lab, gdi.AxisFont, gdi.TextBrush, new PointF(lx, top + h + 8));
+            }
+
+            if (pts == null || pts.Count == 0)
+            {
+                string msg1 = "该日期暂无可绘制的分钟采样数据";
+                string msg2 = "程序需在该日运行满 1 分钟并已落盘；或该日没有采集数据";
+                SizeF s1 = g.MeasureString(msg1, gdi.MsgFont);
+                SizeF s2 = g.MeasureString(msg2, gdi.HintFont);
+                float cx = left + (w - Math.Max(s1.Width, s2.Width)) / 2f;
+                if (cx < left + 4) cx = left + 4;
+                float cy = top + (h - s1.Height - s2.Height - 6) / 2f;
+                if (cy < top + 4) cy = top + 4;
+                g.DrawString(msg1, gdi.MsgFont, gdi.TextBrush, new PointF(cx, cy));
+                g.DrawString(msg2, gdi.HintFont, gdi.HintBrush, new PointF(cx, cy + s1.Height + 6));
+                return;
+            }
+
+            // 曲线：同一条连续分钟段内连线；空档 >5 分钟断开（程序未运行不连线）
+            List<List<long[]>> segs = BuildTrendSegments(pts);
+            for (int si = 0; si < segs.Count; si++)
+            {
+                List<long[]> seg = segs[si];
+                if (seg.Count == 1)
                 {
-                    for (int i = 0; i <= 4; i++)
-                    {
-                        int y = top + h - (int)(h * i / 4.0);
-                        g.DrawLine(grid, left, y, left + w, y);
-                        long v = (long)(maxVal * (i / 4.0));
-                        g.DrawString(FmtBytes(v) + "/分", f8, bgray, new PointF(4, y - 8));
-                    }
-                    for (int hour = 0; hour <= 24; hour += 3)
-                    {
-                        int x = left + (int)(w * hour / 24.0);
-                        g.DrawLine(grid, x, top, x, top + h);
-                        g.DrawString(hour + ":00", f8, bgray, new PointF(x - 12, top + h + 8));
-                    }
+                    DrawTrendDot(g, seg[0], left, top, w, h, yMax, gdi.InPen, gdi.OutPen);
+                    continue;
                 }
-
-                if (d == null || count == 0)
+                PointF[] pin = new PointF[seg.Count];
+                PointF[] pout = new PointF[seg.Count];
+                for (int i = 0; i < seg.Count; i++)
                 {
-                    using (Font f10 = new Font("Microsoft YaHei", 10F))
-                    using (SolidBrush bdg = new SolidBrush(Color.DimGray))
-                    {
-                        string msg = "该日期暂无可绘制的分钟采样数据（程序需运行满 1 分钟并已落盘）";
-                        SizeF m = g.MeasureString(msg, f10);
-                        g.DrawString(msg, f10, bdg, new PointF(left + (w - m.Width) / 2, top + (h - m.Height) / 2));
-                    }
+                    long[] p = seg[i];
+                    float x = left + (float)((double)w * p[0] / 1440.0);
+                    pin[i] = new PointF(x, top + h - (float)((double)h * p[1] / yMax));
+                    pout[i] = new PointF(x, top + h - (float)((double)h * p[2] / yMax));
+                }
+                g.DrawLines(gdi.InPen, pin);
+                g.DrawLines(gdi.OutPen, pout);
+            }
+
+            // 图例（2.2.0 收口：画在绘图区上方留白里，避免挡住 00:00 附近的高值点）
+            g.FillRectangle(gdi.InBrush, left + 8, 6, 10, 10);
+            g.DrawString("下载/分钟", gdi.LegendFont, gdi.InBrush, left + 22, 2);
+            g.FillRectangle(gdi.OutBrush, left + 118, 6, 10, 10);
+            g.DrawString("上传/分钟", gdi.LegendFont, gdi.OutBrush, left + 132, 2);
+
+            // 悬停读数：十字线 + 最近分钟的时间/下载/上传
+            if (hoverIndex >= 0 && hoverIndex < pts.Count)
+                DrawTrendHover(g, gdi, size, left, top, w, h, pts[hoverIndex], dayStartUnix, yMax);
+        }
+
+        static void DrawTrendDot(Graphics g, long[] p, int left, int top, int w, int h, double yMax, Pen inPen, Pen outPen)
+        {
+            float x = left + (float)((double)w * p[0] / 1440.0);
+            float yIn = top + h - (float)((double)h * p[1] / yMax);
+            float yOut = top + h - (float)((double)h * p[2] / yMax);
+            g.DrawEllipse(inPen, x - 2, yIn - 2, 4, 4);
+            g.DrawEllipse(outPen, x - 2, yOut - 2, 4, 4);
+        }
+
+        static string TrendMinuteLabel(long dayStartUnix, long minute)
+        {
+            try
+            {
+                DateTime local = DateTimeOffset.FromUnixTimeSeconds(dayStartUnix + minute * 60).ToLocalTime().DateTime;
+                return local.ToString("HH:mm");
+            }
+            catch
+            {
+                return minute + " 分";
+            }
+        }
+
+        static void DrawTrendHover(Graphics g, TrendGdiCache gdi, Size size, int left, int top, int w, int h, long[] p, long dayStartUnix, double yMax)
+        {
+            float x = left + (float)((double)w * p[0] / 1440.0);
+            g.DrawLine(gdi.CrossPen, x, top, x, top + h);
+
+            float yIn = top + h - (float)((double)h * p[1] / yMax);
+            float yOut = top + h - (float)((double)h * p[2] / yMax);
+            g.FillEllipse(gdi.InBrush, x - 3.5f, yIn - 3.5f, 7, 7);
+            g.FillEllipse(gdi.OutBrush, x - 3.5f, yOut - 3.5f, 7, 7);
+            g.DrawEllipse(gdi.HoverRingPen, x - 3.5f, yIn - 3.5f, 7, 7);
+            g.DrawEllipse(gdi.HoverRingPen, x - 3.5f, yOut - 3.5f, 7, 7);
+
+            string line1 = TrendMinuteLabel(dayStartUnix, p[0]) + " 这一分钟";
+            string line2 = "↓ " + FmtBytes(p[1]) + "    ↑ " + FmtBytes(p[2]);
+            SizeF s1 = g.MeasureString(line1, gdi.TipFont);
+            SizeF s2 = g.MeasureString(line2, gdi.TipFont);
+            float bw = Math.Max(s1.Width, s2.Width) + 14;
+            float bh = s1.Height + s2.Height + 12;
+            float bx = x + 12;
+            if (bx + bw > size.Width - 4) bx = x - 12 - bw;
+            if (bx < 4) bx = 4;
+            float by = top + 8;
+            if (by + bh > top + h - 4) by = top + h - 4 - bh;
+            if (by < top + 4) by = top + 4;
+            g.FillRectangle(gdi.TipShadowBrush, bx + 2, by + 2, bw, bh);
+            g.FillRectangle(gdi.TipBgBrush, bx, by, bw, bh);
+            g.DrawRectangle(gdi.TipBorderPen, bx, by, bw, bh);
+            g.DrawString(line1, gdi.TipFont, gdi.TipTextBrush, new PointF(bx + 7, by + 4));
+            g.DrawString(line2, gdi.TipFont, gdi.TipTextBrush, new PointF(bx + 7, by + 6 + s1.Height));
+        }
+
+        void TrendMouseMove(object sender, MouseEventArgs e)
+        {
+            try
+            {
+                if (trendPoints == null || trendPoints.Count == 0 || trendPanel == null)
+                {
+                    ClearTrendHover();
                     return;
                 }
-
-                long startUnix = DayStartUnix(trendDayDate);
-                PointF[] ptsIn = new PointF[count];
-                PointF[] ptsOut = new PointF[count];
-                int n = 0;
-                foreach (long[] s in d.samples)
+                int left, top, w, h;
+                if (!TrendPlotRect(trendPanel.ClientSize, out left, out top, out w, out h))
                 {
-                    if (s == null || s.Length < 3) continue;
-                    int minute = (int)((s[0] - startUnix) / 60);
-                    if (minute < 0) minute = 0;
-                    if (minute > 1439) minute = 1439;
-                    float x = left + (float)w * minute / 1439f;
-                    float yIn = top + h - (float)h * (s[1] > maxVal ? maxVal : s[1]) / (float)maxVal;
-                    float yOut = top + h - (float)h * (s[2] > maxVal ? maxVal : s[2]) / (float)maxVal;
-                    ptsIn[n] = new PointF(x, yIn);
-                    ptsOut[n] = new PointF(x, yOut);
-                    n++;
+                    ClearTrendHover();
+                    return;
                 }
-                using (Pen pin = new Pen(Color.FromArgb(46, 110, 200), 2))
-                using (Pen pout = new Pen(Color.FromArgb(220, 120, 32), 2))
+                if (e.X < left - 4 || e.X > left + w + 4 || e.Y < top - 4 || e.Y > top + h + 4)
                 {
-                    if (n > 1) { g.DrawLines(pin, ptsIn); g.DrawLines(pout, ptsOut); }
-                    else
-                    {
-                        g.DrawEllipse(pin, ptsIn[0].X - 2, ptsIn[0].Y - 2, 4, 4);
-                        g.DrawEllipse(pout, ptsOut[0].X - 2, ptsOut[0].Y - 2, 4, 4);
-                    }
+                    ClearTrendHover();
+                    return;
                 }
-                using (Font f9 = new Font("Microsoft YaHei", 9F))
-                using (SolidBrush bin = new SolidBrush(Color.FromArgb(46, 110, 200)))
-                using (SolidBrush bout = new SolidBrush(Color.FromArgb(220, 120, 32)))
+                double minuteF = (e.X - left) * 1440.0 / w;
+                int best = 0;
+                double bestDist = Math.Abs(trendPoints[0][0] - minuteF);
+                for (int i = 1; i < trendPoints.Count; i++)
                 {
-                    g.FillRectangle(bin, left + 8, top + 6, 10, 10);
-                    g.DrawString("下载/分钟", f9, bin, left + 22, top + 2);
-                    g.FillRectangle(bout, left + 118, top + 6, 10, 10);
-                    g.DrawString("上传/分钟", f9, bout, left + 132, top + 2);
+                    double dist = Math.Abs(trendPoints[i][0] - minuteF);
+                    if (dist < bestDist) { bestDist = dist; best = i; }
+                }
+                if (best != trendHoverIndex)
+                {
+                    trendHoverIndex = best;
+                    trendPanel.Invalidate();
                 }
             }
             catch { }
+        }
+
+        void ClearTrendHover()
+        {
+            if (trendHoverIndex < 0) return;
+            trendHoverIndex = -1;
+            try { if (trendPanel != null) trendPanel.Invalidate(); }
+            catch { }
+        }
+
+        // 2.2.0 收口：1440 点绘制性能自测（--selftest 调用；只画到内存位图，不写数据目录、不弹窗）
+        internal static string TrendPerfSelfTest()
+        {
+            try
+            {
+                const int pointCount = 1440;
+                const int rounds = 20;
+                List<long[]> pts = new List<long[]>(pointCount);
+                for (int i = 0; i < pointCount; i++)
+                {
+                    double vIn = 1500000 + 1200000 * Math.Sin(i / 300.0);
+                    double vOut = 400000 + 300000 * Math.Cos(i / 400.0);
+                    pts.Add(new long[] { i, (long)Math.Max(0, vIn), (long)Math.Max(0, vOut) });
+                }
+                using (TrendGdiCache gdi = new TrendGdiCache())
+                using (Bitmap bmp = new Bitmap(1000, 520))
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    DrawTrendCore(g, bmp.Size, pts, 1700000000L - (1700000000L % 60), -1, gdi);   // 预热
+                    Stopwatch sw = Stopwatch.StartNew();
+                    for (int i = 0; i < rounds; i++)
+                        DrawTrendCore(g, bmp.Size, pts, 1700000000L - (1700000000L % 60), (i * 53) % pointCount, gdi);
+                    sw.Stop();
+                    double avg = sw.Elapsed.TotalMilliseconds / rounds;
+                    return string.Format("趋势绘制 1440 点 × {0} 次：平均 {1:0.0} ms/次，最坏含悬停十字线；位图 {2}×{3}",
+                        rounds, avg, bmp.Width, bmp.Height);
+                }
+            }
+            catch (Exception ex)
+            {
+                return "趋势绘制性能自测异常: " + ex.Message;
+            }
         }
 
         // =============================================================
@@ -1317,6 +1715,23 @@ namespace NetWatcher
             curSnap = snap;
             UpdateHeader(snap);
 
+            // 2.2.0 收口：跨日自动刷新日期行（今天高亮/昨天置灰/日历 MaxDate）。
+            // 若用户正停在“今天”，跟随到新的今天；若停在历史日期则只刷新按钮状态。
+            try
+            {
+                DateTime todayNow = DateTime.Now.Date;
+                if (dateRowToday != DateTime.MinValue && dateRowToday != todayNow)
+                {
+                    string oldToday = dateRowToday.ToString(DateFmt);
+                    dateRowToday = todayNow;
+                    if (selectedDate == oldToday || string.CompareOrdinal(selectedDate, todayNow.ToString(DateFmt)) > 0)
+                        SetDate(todayNow);
+                    else
+                        UpdateDateBar();
+                }
+            }
+            catch { }
+
             if (snap.LastScan != lastScanRendered)
             {
                 lastScanRendered = snap.LastScan;
@@ -1497,27 +1912,30 @@ namespace NetWatcher
             List<LiveIp> ips = new List<LiveIp>();
             List<LiveConn> conns = new List<LiveConn>();
 
-            // 2.2.0：活动筛选（全部 / 新出现 / 仅活跃 / 大流量 Top20 / 仅公网 / 长连接）
+            // 2.2.0：活动筛选（全部 / 今天新出现 / 仅活跃 / 当前速度 Top20 / 仅公网 / 长连接）
+            // 2.2.0 收口：第 4 项语义澄清——「当前速度 Top20」按本采样速率（BytesIn+BytesOut ÷ 采样间隔 = B/s）排序，
+            // 不是历史累计；IP 表与连接表使用同一份 IP 集合（都由本采样快照得出），口径一致。
+            // （旧实现用 c.BytesIn + c.BytesOut —— 那是连接生命周期累计，容易被误解为"大流量"。）
             filtMode = ActivityFilter;
             filtEst = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             filtLong = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             filtTop = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (snap != null && snap.Conns != null)
             {
-                Dictionary<string, long> totals = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+                Dictionary<string, long> speeds = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
                 foreach (LiveConn c in snap.Conns)
                 {
                     if (c == null) continue;
                     if (c.State == "ESTABLISHED") filtEst.Add(c.Ip);
                     if (c.DurationSeconds >= 60) filtLong.Add(c.Ip);
-                    long t = c.BytesIn + c.BytesOut;
+                    long sp = c.SpeedInBps + c.SpeedOutBps;
                     long old;
-                    if (!totals.TryGetValue(c.Ip, out old)) old = 0;
-                    totals[c.Ip] = old + t;
+                    if (!speeds.TryGetValue(c.Ip, out old)) old = 0;
+                    speeds[c.Ip] = old + sp;
                 }
                 if (filtMode == 3)
                 {
-                    List<KeyValuePair<string, long>> tl = new List<KeyValuePair<string, long>>(totals);
+                    List<KeyValuePair<string, long>> tl = new List<KeyValuePair<string, long>>(speeds);
                     tl.Sort(delegate(KeyValuePair<string, long> a, KeyValuePair<string, long> b) { return b.Value.CompareTo(a.Value); });
                     for (int i = 0; i < tl.Count && i < 20; i++) filtTop.Add(tl[i].Key);
                 }
@@ -1629,15 +2047,19 @@ namespace NetWatcher
             ApplySortGlyph(dgvConns, sortConns);
 
             string fname = ActivityFilterName();
+            // 2.2.0 收口：空结果/筛选说明直接写在标题栏（复用既有文案机制，无新增 UI）
+            string emptyHint = "";
+            if (ips.Count == 0 || conns.Count == 0) emptyHint = BuildLiveEmptyHint(q, snap != null);
+            string localNote = (filtMode == 4 && !cfg.ShowLocalIp) ? " · 设置已隐藏内网/本机地址" : "";
             lblIpsTitle.Text = "各 IP 连接摘要（" + ips.Count + " 个 IP"
                 + (fname.Length > 0 ? " · 筛选: " + fname : "")
                 + (pinnedIp.Length > 0 ? " · IP 筛选: " + pinnedIp : "")
                 + (q.Length > 0 ? " · 搜索: " + q : "")
-                + "）   点击列头排序";
+                + "）" + localNote + (ips.Count == 0 ? emptyHint : "") + "   点击列头排序";
             lblConnsTitle.Text = "当前连接明细（" + conns.Count + " 条连接"
                 + (fname.Length > 0 ? " · 筛选: " + fname : "")
                 + (q.Length > 0 ? " · 搜索: " + q : "")
-                + "）   双击行 = 按该 IP 筛选上表";
+                + "）" + localNote + (conns.Count == 0 ? emptyHint : "") + "   双击行 = 按该 IP 筛选上表";
 
             UpdateVolumeLabels(snap);
         }
@@ -2177,6 +2599,8 @@ namespace NetWatcher
         void SetDate(DateTime d)
         {
             if (inSetDate) return;
+            // 2.2.0 收口：防御未来日期（日历已禁未来，但历史跳转/跨日时钟回拨也要挡住）
+            if (d.Date > DateTime.Now.Date) d = DateTime.Now.Date;
             inSetDate = true;
             try
             {
@@ -2194,6 +2618,20 @@ namespace NetWatcher
                 if (tabs.SelectedTab == tpLive) RebindLive(curSnap);
                 else RebindActiveTab(true);
             }
+        }
+
+        // 2.2.0 收口：历史概览双击跳转——先切到「按日统计」再选日期。
+        // 切页期间用 inSetDate 抑制 SelectedIndexChanged 里按旧日期做一次多余重绑。
+        void JumpToDate(DateTime d)
+        {
+            if (tabs != null && tabs.SelectedTab != tpDate)
+            {
+                bool old = inSetDate;
+                inSetDate = true;
+                try { tabs.SelectedTab = tpDate; }
+                finally { inSetDate = old; }
+            }
+            SetDate(d);
         }
 
         string Query
@@ -2260,7 +2698,12 @@ namespace NetWatcher
             try { cfg.AutoStart = Startup.IsEnabled(); } catch { }
             using (SettingsForm f = new SettingsForm(cfg))
             {
-                if (f.ShowDialog(this) != DialogResult.OK) return;
+                if (f.ShowDialog(this) != DialogResult.OK)
+                {
+                    // 2.2.0 收口：设置窗口关闭后回到主窗口，强制重排一次日期行，避免弹窗期间布局未刷新
+                    UpdateDateBar();
+                    return;
+                }
                 try { cfg.Save(); }
                 catch { }
                 try { Startup.SetEnabled(cfg.AutoStart); cfg.AutoStart = Startup.IsEnabled(); }
@@ -2269,6 +2712,7 @@ namespace NetWatcher
                 try { GeoIp.SetEnabled(cfg.GeoEnabled); } catch { }
                 UpdateIntervalLabel();
                 UpdateAdminButton();
+                UpdateDateBar();   // 显示内网开关可能变化 → 「仅公网」提示/空态文案要跟着变
                 ForceRefresh();
             }
         }
@@ -2416,6 +2860,8 @@ namespace NetWatcher
             WindowState = FormWindowState.Normal;
             Activate();
             BringToFront();
+            // 2.2.0 收口：从托盘隐藏→显示后重排日期行，避免 FlowLayoutPanel 停留在隐藏前的布局
+            try { UpdateDateBar(); } catch { }
         }
 
         void ExitApp()
@@ -2445,6 +2891,13 @@ namespace NetWatcher
             try { if (toolTip != null) { toolTip.Dispose(); toolTip = null; } }
             catch { }
             Close();
+        }
+
+        // 2.2.0 收口：趋势页缓存的 Font/Pen/Brush 在窗体释放时一起释放
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) DisposeTrendResources();
+            base.Dispose(disposing);
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)

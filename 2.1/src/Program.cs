@@ -528,6 +528,12 @@ namespace NetWatcher
             L("  " + Startup.SelfTestAutoStart());
             L("  真实自启项(只读): HKCU Run\\NetWatcher2.1 " + (Startup.IsEnabled() ? "已启用" : "未启用"));
 
+            // 趋势页绘制性能（2.2.0 收口：1440 点自绘到内存位图，只读、不写数据目录）
+            L("");
+            L("--- 趋势页绘制（2.2.0）---");
+            try { L("  " + MainForm.TrendPerfSelfTest()); }
+            catch (Exception tpEx) { L("  趋势绘制自测异常: " + tpEx.Message); }
+
             L("");
             L("=== 自检结束 ===");
             try { File.WriteAllText(logPath, sb.ToString()); } catch { }
