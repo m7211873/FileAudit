@@ -14,7 +14,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo >> 开始自签名...
+echo 开始自签名...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\sign\sign.ps1" -Exe "%~dp0bin\NetWatcher.exe"
 if errorlevel 1 (
     echo [WARN] 签名失败，程序本身仍可运行（只是会显示"未知发布者"）。
