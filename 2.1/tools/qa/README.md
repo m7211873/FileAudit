@@ -2,7 +2,7 @@
 
 本目录是 QA 归属区（design §7：QA 只写 `tools/qa/**`）。一键验收 = `verify.ps1`；
 P0 修复回归 = `regression-p0.ps1`；P1 修复回归 = `regression-p1.ps1`。全部脚本 UTF-8 BOM、PS 5.1 Parser 0 错误。
-**当前版本：2.2.0（5 标签，含「趋势」页）；定版验收数字见下方「2.2.0 最终验收结果」。**
+**当前版本：2.2.1（5 标签，含「趋势」页；进程视图刷新保持展开/选中、默认全部折叠）；回归数字见下方「2.2.1 回归结果」。**
 
 ## 快速开始
 
@@ -18,34 +18,38 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\verify.ps1 -Screens
 ```
 退出码：有 FAIL → 1；全 PASS → 0。证据/报告输出到 `tools/qa/out/`，测试数据写 `%TEMP%\ipmon-qa-*`（仓库外）。
 
-## 2.2.0 最终验收结果（2026-11-01 定版，独立 QA 取证；代码 `1369c0b`）
+## 2.2.1 回归结果（2026-11-01 补丁版，独立 QA 取证；代码 `6dffea3`）
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 编译 `build.bat` | **0 error / 0 warning**；`bin\NetWatcher.exe` 132,608 B、FileVersion/ProductVersion **2.2.0.0** | `out/build_*.log` |
-| P0 回归 `regression-p0.ps1` | **PASS=30 FAIL=0 WARN=0**（tag `20261101-133014`） | `out/regression_20261101-133014.txt/.json` |
-| P1 回归 `regression-p1.ps1` | **PASS=38 FAIL=0 WARN=0**（tag `20261101-133052`；R9=2.2.0.0） | `out/regression_p1_20261101-133052.txt/.json` |
-| 启动顺序 `regression-activation.ps1` | **PASS=9 FAIL=0**（临时目录 `nw21-act-6a773f3a`） | 同目录脚本输出 |
-| 托盘/退出 `regression-quit.ps1` | **PASS=6 FAIL=0**（临时目录 `nw21-quit-022f7319`） | 同目录脚本输出 |
-| 无界面 `verify.ps1 -SkipGui -Seconds 30 -AuditRealData` | **PASS=29 FAIL=0 WARN=0**（tag `20261101-133936`） | `out/report_20261101-133936.txt/.json` |
-| GUI 5 标签 `verify.ps1 -Seconds 20 -MutexTag v220-final` | **PASS=52 FAIL=0 WARN=0**（tag `20261101-134025`；含全部 2.2.0 GUI/趋势页/日期行/性能断言） | `out/report_20261101-134025.txt/.json`、`out/gui_*_20261101-134025.png` |
+| 编译 `build.bat` | **0 error / 0 warning**；`bin\NetWatcher.exe` 133,632 B、FileVersion/ProductVersion **2.2.1.0** | `out/build_*.log` |
+| P0 回归 `regression-p0.ps1` | **PASS=30 FAIL=0 WARN=0**（tag `20261101-165800`） | `out/regression_20261101-165800.txt/.json` |
+| P1 回归 `regression-p1.ps1` | **PASS=38 FAIL=0 WARN=0**（tag `20261101-165628`；R9=2.2.1.0） | `out/regression_p1_20261101-165628.txt/.json` |
+| 启动顺序 `regression-activation.ps1` | **PASS=9 FAIL=0**（临时目录 `nw21-act-48473a39`） | 同目录脚本输出 |
+| 托盘/退出 `regression-quit.ps1` | **PASS=6 FAIL=0**（临时目录 `nw21-quit-5b863180`） | 同目录脚本输出 |
+| 无界面 `verify.ps1 -SkipGui -Seconds 30 -AuditRealData` | **PASS=29 FAIL=0 WARN=0**（tag `20261101-165840`） | `out/report_20261101-165840.txt/.json` |
+| GUI 5 标签 `verify.ps1 -Seconds 20 -MutexTag v221` | **PASS=52 FAIL=0 WARN=0**（tag `20261101-165935`；含全部 2.2.0 GUI/趋势页/日期行/性能断言） | `out/report_20261101-165935.txt/.json`、`out/gui_*_20261101-165935.png` |
 
+- 与 2.2.0 定版基线**逐项一致**（30/38/9/6/29/52 全 PASS）；2.2.1 补丁（进程树刷新保持展开/选中、默认全部折叠、5s 整体刷新保留）未引入回归。
 - 环境说明（判据未削弱、未改判）：
-  1. `SELFTEST_GEOIP`：定版最终 run（13:39/13:40）直连 `ip-api.com` 成功 → PASS。此前 13:32–13:37 的几次尝试该检查间歇超时
-     （对照组 `_analysis\v220-验收\raw\final_geoip_control.log`：同一时段 ip-api.com 时通时断、10s 超时，而 `https://www.baidu.com/` 95ms/200 OK），
-     属网络波动（2.1.1 亦记录为已知环境性），脚本已内置一次重试；若发布前复跑偶发该 FAIL，按此归因。
-  2. `SELFTEST_ESTATS_DIAG`：判据已修正为校验 **rw×rod 诊断组合数 >=6**（design §6 矩阵 rw 1/4 × rod 48/16/1024），
-     不再用「诊断行数 >=5」——行数等于自检时远端连接数（3~5 随环境变），会产生假 WARN。最终 run 30 组合 → PASS。
-  3. `REALDATA_UNTOUCHED` PASS：所有运行前后 `%APPDATA%\NetWatcher` 9 文件 size+mtime+SHA256 全一致；
-     用户 2.0 实例 PID 10856 未运行（严格判定一次通过）。
-- 2.2.0 新增 GUI 覆盖（逐项真断言，非“假 PASS”）：
-  - 5 标签文本/切换/真实点击全 PASS；每页 DataGridView 数（剔除趋势页自绘 Panel）= `2,0,1,0,1`；
-  - 趋势页专项：`GUI_TREND_SUMMARY`（真实汇总文本）、`GUI_TREND_SEED_LOADED`（预置 24 分钟桶、读到 26 条）、
-    `GUI_TREND_SEGMENTS`（密集分钟桶连成 1 段，断点判据不误断）、`GUI_TREND_PANEL`（自绘 Panel 1148×534 可见 100%）、
-    `GUI_TREND_CURVE`（截图曲线区像素证据：下载蓝线 625 px / 上传橙线 330 px）；
-  - 活动筛选/按页日期行：`GUI_LIVE_DATEROW_HIDDEN`、`GUI_LIVE_ACTIVITY_FILTER`、`GUI_DATEBAR_TREND` 全 PASS；
-  - 自检性能：`SELFTEST_TREND_PERF` 1440 点×20 次平均 2.4–2.7ms（阈值 <100ms）。
-- 详细报告：`D:\IP监控2.1版\_analysis\v220-验收\01-基线回归.md`（WIP d13f110 基线）、`02-最终回归.md`（定版 1369c0b，逐项对比基线）。
+  1. `SELFTEST_GEOIP`：SkipGui run 首次直连失败、脚本自动重试后 PASS（ip-api.com 间歇网络波动，2.1.1 起已知环境性）。
+  2. `REALDATA_UNTOUCHED`：两次 verify run 均 PASS。首次 p0 尝试（tag `20261101-165550`）R5 报 2 处变化（`data/2026-11-01.json`、`startup.log`），
+     归因为 Lead 在测试窗口内用 `--quit` 停掉用户真实实例（PID 19040，变化时间 16:55:55）；真实数据静止后重跑 p0 → `R5_REALDATA_UNTOUCHED` PASS。
+     该次 FAIL 报告保留在 `out/regression_20261101-165550.txt`，不删不改判。
+  3. `SELFTEST_ESTATS_DIAG` 按 rw×rod 组合数 >=6 判定（两次 run 均 30 组合）；`SELFTEST_TREND_PERF` 2.4–2.6ms。
+- 自动化覆盖边界（如实声明）：`进程视图刷新后保持展开/选中、默认全部折叠` 属 TreeView 节点状态，跨进程无法用纯整数消息断言，
+  已留给 UI 手测（ui-verifier）；自动化侧覆盖其不回归（5 标签/GUI 全 PASS、R6/R10/R11 正常、进程视图 TreeView 可见）。
+- 详细报告：`D:\IP监控2.1版\_analysis\v221-验收\01-回归.md`。
+
+### 2.2.0 定版基线（2026-11-01，存档）
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| `build.bat` | 0 error / 0 warning；`bin\NetWatcher.exe` 132,608 B、**2.2.0.0** | `out/build_*.log` |
+| P0 / P1 | PASS=30 / PASS=38，FAIL=0 WARN=0 | tag `20261101-133014` / `20261101-133052` |
+| activation / quit | PASS=9 / PASS=6 | `nw21-act-6a773f3a` / `nw21-quit-022f7319` |
+| verify -SkipGui / GUI 5 标签 | PASS=29 / PASS=52，FAIL=0 WARN=0 | tag `20261101-133936` / `20261101-134025` |
+| 详细报告 | `_analysis\v220-验收\01-基线回归.md`、`02-最终回归.md` | 同目录 |
 
 ### 2.1.1 历史基线（2026-10-31，仅存档）
 
@@ -71,6 +75,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\regression-p0.ps1
 - 报告：`out/regression_<tag>.txt/.json`；退出码 0/1。
 - 2026-10-31 独立验收基线：`RESULT: PASS  PASS=29 FAIL=0 WARN=0`（run tag `20261031-162506`），详见 `_analysis\2.1-P0-验收.md`。
 - **2.2.0 定版（2026-11-01，代码 `1369c0b`）：`RESULT: PASS  PASS=30 FAIL=0 WARN=0`（run tag `20261101-133014`）。**
+- **2.2.1 补丁（2026-11-01，代码 `6dffea3`）：`RESULT: PASS  PASS=30 FAIL=0 WARN=0`（run tag `20261101-165800`）。**
 
 ## 2.1 P1-A/B 修复回归（`regression-p1.ps1`）
 
@@ -82,6 +87,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\regression-p1.ps1
 - 注册表安全：脚本开始备份 `Run\NetWatcher2.1` 与 `Run\NetWatcher`，各用例 finally + 外层 finally 双重精确恢复（原本不存在→删除），验证值名含点号用 .NET Registry API 按完整值名读写。
 - 报告：`out/regression_p1_<tag>.txt/.json`；2026-10-31 独立验收基线：`RESULT: PASS  PASS=38 FAIL=0 WARN=0`（run tag `20261031-163501`），详见 `_analysis\2.1-P1-验收.md`。
 - **2.2.0 定版（2026-11-01，代码 `1369c0b`）：`RESULT: PASS  PASS=38 FAIL=0 WARN=0`（run tag `20261101-133052`，R9=2.2.0.0）。**
+- **2.2.1 补丁（2026-11-01，代码 `6dffea3`）：`RESULT: PASS  PASS=38 FAIL=0 WARN=0`（run tag `20261101-165628`，R9=2.2.1.0）。**
 
 ## 参数
 
@@ -237,4 +243,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa\regression-quit.ps1
 - Q1 启动隐藏；Q2 `--quit` 后主实例 10s 内退出；Q3 `startup.log` 有 `Application.Run 退出`；
   Q4 数据已落盘且 JSON 可解析；Q5 无 ui-error/crash；Q6 进程清理。
 - 2026-10-31 基线：`RESULT: PASS  PASS=6 FAIL=0`（2.2.0 定版复跑：`RESULT: PASS  PASS=6 FAIL=0`，临时目录 `nw21-quit-022f7319`）。
-- 同时 `regression-p1.ps1` 的 R9 版本断言改为接受 `2.x.y.0`（2.1.1 起版本号会变；2.2.0 定版为 2.2.0.0）。
+- 同时 `regression-p1.ps1` 的 R9 版本断言改为接受 `2.x.y.0`（2.1.1 起版本号会变；2.2.0=2.2.0.0、2.2.1=2.2.1.0）。
