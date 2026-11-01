@@ -1,8 +1,8 @@
 # IP监控2.1 · 网络连接监控（NetWatcher）
 
 > 项目代号：**IP监控2.1**（IP监控2.0 的迭代修复版）
-> 当前版本：**2.2.0 定版（2026-11-01）** —— 在 2.1.x 修复基础上，把"今天/昨天/前天"做成按页生效的日期行，实时连接页新增**活动筛选**，并新增第 5 个标签页**趋势**（24 小时上下行曲线）；发布前完成趋势样本/断点/Y 轴/悬停、筛选语义、5 标签布局等收口。
-> 验证（2026-11-01，`1369c0b`）：最终全量回归 **164 项全 PASS（0 FAIL / 0 WARN）**——P0 30/30、P1 38/38、activation 9/9、quit 6/6、verify headless 29/29、5 标签 GUI 52/52；真机 UI 手测 **8 轮 419 项 PASS（0 FAIL / 0 WARN）**（未测项：150% DPI、"只有内网 IP" 场景、托盘图标肉眼可见性，原因见报告）；发布截图 6 张见 `docs/screenshots/`；详见 [CHANGELOG.md](CHANGELOG.md)「[2.2.0] · 验证」。
+> 当前版本：**2.2.1 定版（2026-11-01）** —— 2.2.0 功能版本（智能日期行 / 活动筛选 / 趋势页）之上的补丁版：修复进程视图每 5 秒自动刷新时丢失展开状态/选中行，以及"用户全部折叠被误判为首次构建而自动全展开"；现在默认全部折叠、只恢复用户展开过的节点，并恢复选中行与滚动位置。
+> 验证（2026-11-01）：2.2.1 回归 6 套件 **164 项全 PASS（0 FAIL / 0 WARN）**——p0 30/30、p1 38/38（R9=2.2.1.0）、activation 9/9、quit 6/6、verify headless 29/29、5 标签 GUI 52/52（报告 `_analysis\v221-验收\01-回归.md`）；签名 exe **135,056 B / 2.2.1.0 / Authenticode `Valid` / SHA256 `DE0A2B20…`**；真机 UI 手测 **PASS=40 / FAIL=0 / WARN=0**（默认全部折叠 / 展开+选中跨 12s 保持 / 全折叠后 7s 不自动展开 / 切页往返保持 / 新节点默认折叠；报告 `_analysis\v221-验收\02-进程树状态验证.md`）；2.2.0 的 164 项回归与 419 项手测见 [CHANGELOG.md](CHANGELOG.md)「[2.2.0] · 验证」。
 > 2.0 的交付物保持在 Gitee 仓库根目录不动；2.1 是与其**并列的新文件夹** `2.1/`。
 
 一个在 Windows 上运行的**常驻后台**网络连接监控工具，图形化界面，记录电脑每次连接了哪些 IP、收发多少数据、连接了多久，并自动识别 IP 归属地（精确到城市）。
@@ -11,7 +11,7 @@
 - 数据按**日期**归档，可查看今天 / 昨天 / 前天或任意一天；旧版 1.0 的数据文件可以直接读取。
 - **诚实标注**：普通权限下逐 IP 流量是「估算」，管理员权限下 EStats 可用才是「精确」，界面上明确区分。
 
-> **2.1 是什么**：2.0 的核心能力（五标签页（2.2.0 新增趋势）、原子写盘、诚实降级、托盘自启）全部保留；2.1 把 2.0 里"不够好"的地方修到可用，并已定版（2.2.0）：
+> **2.1 是什么**：2.0 的核心能力（五标签页（2.2.0 新增趋势）、原子写盘、诚实降级、托盘自启）全部保留；2.1 把 2.0 里"不够好"的地方修到可用，并已定版（2.2.1）：
 > **P0**——同日重启丢当天数据、`--selftest` 覆盖当天数据、`--selftest` 篡改开机自启、同一数据目录可能被多个实例同时写；
 > **P1**——自启状态对账、启动最小化生效、管理员重启保留 `--datadir`、归属地开关即时生效、1.0 旧数据不再假精确、
 > 精确模式 tooltip 说明仅 IPv4 TCP、非实时页刷新节流、EStats 首错写日志且恢复后清除错误。
@@ -34,14 +34,14 @@
 
 | 文档 | 给谁看 | 内容 |
 |---|---|---|
-| [docs/START-HERE.md](docs/START-HERE.md) | **接手者/新智能体** | 2.2.0 起点：路径、30 秒命令、必读顺序、硬性约束（**第一站**） |
+| [docs/START-HERE.md](docs/START-HERE.md) | **接手者/新智能体** | 2.2.1 起点：路径、30 秒命令、必读顺序、硬性约束（**第一站**） |
 | [docs/用户手册.md](docs/用户手册.md) | 普通用户 | 安装、界面截图导览、常见任务、FAQ、故障排查 |
 | [docs/踩坑与决策记录.md](docs/踩坑与决策记录.md) | 开发者/接手者 | 症状→根因→处理→证据 + ADR 决策表（**最值得先读**；已追加 2.1 新坑） |
 | [docs/开发与维护指南.md](docs/开发与维护指南.md) | 开发者 | 代码地图、启动顺序、数据模型、构建/签名/验收、扩展点 |
 | [docs/2.1-交接说明.md](docs/2.1-交接说明.md) | 接手者 | 2.1 现状、改动清单、待办、验收证据、下次怎么继续 |
 | [docs/design-2.1.md](docs/design-2.1.md) | 开发者 | **2.1 设计契约**（默认 2s、1~60 档、`--show`/`--mutex-tag`、单写锁、selftest 只读） |
 | [docs/design-2.0.md](docs/design-2.0.md) | 开发者 | 2.0 历史设计契约（保留作对照，不再维护） |
-| [CHANGELOG.md](CHANGELOG.md) | 所有人 | 版本变更（[2.2.0] 智能日期行/活动筛选/趋势页 + [2.1.1] 托盘修复/优雅退出 + [2.1.0] 定版） |
+| [CHANGELOG.md](CHANGELOG.md) | 所有人 | 版本变更（[2.2.1] 进程视图刷新保持展开/选中 + [2.2.0] 智能日期行/活动筛选/趋势页 + [2.1.1] 托盘修复/优雅退出 + [2.1.0] 定版） |
 | [tools/sign/README.md](tools/sign/README.md) | 发布者 | 自签名用法 + 2026 商业证书调研（复用 `CN=NSYBdeDFY NetWatcher` 证书） |
 | [tools/qa/README.md](tools/qa/README.md) | 开发者 | 一键验收 + P0/P1 回归脚本用法、检查项与基线结果 |
 
@@ -77,6 +77,7 @@
 | 活动筛选（2.2.0） | 实时连接页下拉：全部 / 今天新出现(NEW) / 仅活跃(ESTABLISHED) / **当前速度 Top20** / 仅公网 IP / 长连接(>60 秒)；与搜索、双击 IP 筛选叠加；「今天新出现」= 该 IP 在本日（本地日界）首次出现，运行满一天后约等于「全部」 |
 | 日期行按页生效（2.2.0） | 实时连接页隐藏日期行；进程视图/按日统计/趋势页显示；「今天」恒可选、当前日期高亮、无数据置灰、不可选未来日期；空日期有明确空态；历史概览双击跳转按日统计 |
 | 趋势页（2.2.0 新增） | 第 5 个标签页：用每日 JSON 的 `samples` 分钟桶画 24 小时上下行曲线（蓝=下载/分钟、橙=上传/分钟），3 小时网格；顶部汇总当日总量、分钟桶数、峰值/分钟、平均/分钟；相邻分钟桶间隔 >5 分钟断开不连线；鼠标悬停显示该分钟读数 |
+| 进程视图刷新状态（2.2.1） | 自动刷新（约 5 秒）时保持展开/选中/滚动位置：默认全部折叠，只恢复用户展开过的节点；新出现的节点默认折叠；切到其它标签页再切回也保持 |
 | 后台常驻 | 关闭窗口最小化到系统托盘，监控继续运行；单实例：重复启动**不会弹「已经在运行」**，而是直接**唤出已有实例的窗口**（`--show` 同义）；若已有实例卡死，程序会提示到任务管理器结束 `NetWatcher.exe` |
 | 托盘图标（2.1.1 修复） | 启动后只补偿/重建一次托盘图标，退出先停定时器再释放图标；不会再因反复 hide/show 或退出竞态产生"重复/幽灵图标"。可用 `--quit` 优雅停止程序 |
 | 开机自启 | 写入 HKCU 启动项（2.1 的值名是 `NetWatcher2.1`），登录后在后台运行（不需要管理员） |
@@ -94,7 +95,7 @@
 
 第三行按页切换：`实时连接` 页是**活动筛选**下拉（全部 / 今天新出现 / 仅活跃 / 当前速度 Top20 / 仅公网 IP / 长连接>60s）；`进程视图`/`按日统计`/`趋势` 页是日期行（`今天 / 昨天 / 前天` + 日历 + **搜索框** + 刷新按钮；今天恒可选、当前选择高亮、无数据日期置灰、不能选未来日期）；`历史概览` 页列出所有天。
 
-> 主窗口标题 / 设置窗口标题里的版本号由程序维护（`2.1\src\AssemblyInfo.cs` 的 `AssemblyVersion=2.2.0.0`）；截图见 `docs/screenshots/`（**2.2.0 真机截图**：tab1~tab5 + 设置）。
+> 主窗口标题 / 设置窗口标题里的版本号由程序维护（`2.1\src\AssemblyInfo.cs` 的 `AssemblyVersion=2.2.1.0`）；截图见 `docs/screenshots/`（**2.2.0 真机截图**：tab1~tab5 + 设置；2.2.1 界面一致）。
 
 ### 2.2 五个标签页（2.2.0 新增「趋势」）
 
@@ -317,7 +318,7 @@ build.bat
 - 需要 .NET Framework 4.8 运行时：Windows 10 1903 及以上、Windows 11 通常已自带；
 - 编译产物是单个 `2.1\bin\NetWatcher.exe`，但运行时仍需要 .NET Framework 4.8；
 - 编译零 NuGet 依赖、零第三方库；
-- 版本号在 `2.1\src\AssemblyInfo.cs`（`AssemblyVersion`/`AssemblyFileVersion` = **2.2.0.0**）。
+- 版本号在 `2.1\src\AssemblyInfo.cs`（`AssemblyVersion`/`AssemblyFileVersion` = **2.2.1.0**）。
 
 ---
 
@@ -353,7 +354,7 @@ build.bat
 - **签名必须在编译之后做**：`build.bat` 会覆盖 `bin\NetWatcher.exe`，重编译后要重新签名。
   一条命令完成两者：`build-and-sign.bat`（先编译再调用签名脚本）。
 - **2.1 复用 2.0 已有的证书**：`Cert:\CurrentUser\My` 里的 `CN=NSYBdeDFY NetWatcher`（NotAfter 2029，HasPrivateKey=True）。**不要新建证书**（换证书 = 换发布者身份）。
-- **2.2.0 定版 exe 已用同一张证书签名**：`2.1\bin\NetWatcher.exe` 为 **134,032 B / 2.2.0.0 / Authenticode `Valid` / SHA256 `8C3BBD86…`**（`CN=NSYBdeDFY NetWatcher`）；发布前用 `tools\sign\verify-sign.ps1` 复核，重新编译后必须重签；
+- **2.2.1 定版 exe 已用同一张证书签名**：`2.1\bin\NetWatcher.exe` 为 **135,056 B / 2.2.1.0 / Authenticode `Valid` / SHA256 `DE0A2B20…`**（`CN=NSYBdeDFY NetWatcher`）；发布前用 `tools\sign\verify-sign.ps1` 复核，重新编译后必须重签；
   发布前用 `tools\sign\verify-sign.ps1` 复核，重新编译后必须重签（签名后哈希会变，以验证脚本输出为准）。
 - 签名脚本：`tools\sign\sign.ps1`（自签名，不需要 Windows SDK / signtool，不需要管理员），
   `tools\sign\verify-sign.ps1` 验证，`tools\sign\README.md` 有完整说明与 2026 年商业证书调研结论。
@@ -389,7 +390,7 @@ NetWatcher/                  # Gitee 仓库根；这里的 2.0 文件一律不�
     │   ├── GeoIp.cs         # IP 归属地（后台解析 + 缓存）
     │   ├── Config.cs        # 配置
     │   ├── Json.cs          # JSON 小工具
-    │   └── AssemblyInfo.cs  # 2.2.0.0 版本与产品信息
+    │   └── AssemblyInfo.cs  # 2.2.1.0 版本与产品信息
     ├── bin\NetWatcher.exe   # 编译产物（需先 build.bat）
     ├── app.ico
     ├── build.bat / build-and-sign.bat
@@ -405,8 +406,8 @@ NetWatcher/                  # Gitee 仓库根；这里的 2.0 文件一律不�
 
 ## 发布包与镜像
 
-- **GitHub Release（推荐下载）**：https://github.com/m7211873/FileAudit/releases/tag/v2.2.0
-  （附件 `NetWatcher-2.2.0-release.zip`：签名 exe + 安装/卸载脚本 + 全套文档 + 2.2.0 真机截图 + 发布说明）
-- **历史版本**：v2.1.1（附件 `NetWatcher-2.1.1-release.zip`）、v2.1.0
+- **GitHub Release（推荐下载）**：https://github.com/m7211873/FileAudit/releases/tag/v2.2.1
+  （附件 `NetWatcher-2.2.1-release.zip`：签名 exe + 安装/卸载脚本 + 全套文档 + 发布说明）
+- **历史版本**：v2.2.0（`NetWatcher-2.2.0-release.zip`）、v2.1.1（`NetWatcher-2.1.1-release.zip`）、v2.1.0
 - **Gitee 仓库**：https://gitee.com/NSYBdeDFY/FileAudit/tree/main/2.1
 - **GitHub 仓库**：https://github.com/m7211873/FileAudit/tree/main/2.1

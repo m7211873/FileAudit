@@ -1,8 +1,8 @@
-# IP监控2.1 · 设计契约（已实现 · 2.2.0 定版）
+# IP监控2.1 · 设计契约（已实现 · 2.2.1 定版）
 
-> 本文件是 IP监控2.1 的开发契约，**已于 2026-11-01 按 2.2.0 定版**：2.1.0 的 P0 四项 + P1 八项修复、
-> 2.1.1 托盘修复、2.2.0 的日期行/活动筛选/趋势页均已落地并冻结；最终全量回归 **164 项全 PASS（0 FAIL / 0 WARN）**
-> —— P0 30/30、P1 38/38、activation 9/9、quit 6/6、verify headless 29/29、5 标签 GUI 52/52；真机 UI 手测 **8 轮 419 项 PASS（0 FAIL / 0 WARN）**（未测项见 `03-手工验收.md`）。
+> 本文件是 IP监控2.1 的开发契约，**已于 2026-11-01 按 2.2.1 定版**：2.1.0 的 P0 四项 + P1 八项修复、
+> 2.1.1 托盘修复、2.2.0 的日期行/活动筛选/趋势页、2.2.1 的进程视图刷新状态保持均已落地并冻结；
+> 2.2.0 定版验证为 **164 项回归全 PASS + 419 项真机手测 PASS（0 FAIL / 0 WARN）**；2.2.1 回归同样 **164 项全 PASS**（p0 30/30、p1 38/38、activation 9/9、quit 6/6、headless 29/29、GUI 52/52，`_analysis\v221-验收\01-回归.md`），进程树刷新行为真机 UI 手测 **PASS=40 / FAIL=0 / WARN=0**（`_analysis\v221-验收\02-进程树状态验证.md`）。
 > 基线：IP监控2.0.2（Gitee `main` = `b7b3720`），2.1 从 2.0 复制到 `2.1/` 后迭代。
 > 技术约束不变：**C# 5 语法、.NET Framework 4.8、WinForms、系统自带 `csc.exe`、零 NuGet、单个 `NetWatcher.exe`**。
 > 历史契约见 `docs/design-2.0.md`（保留，不再维护）；与 2.0 的差异汇总见 §12。
@@ -35,7 +35,7 @@
 | 单实例互斥量 | `NetWatcher2.1_SingleInstance_Mutex`（`--mutex-tag X` → `…_X`） |
 | 唤出事件 | `NetWatcher2.1_SingleInstance_Mutex_Activate`（`--mutex-tag X` → `…_X`） |
 | 数据写锁 | `NetWatcher2.1_DataLock_<MD5(数据目录绝对路径小写)>`（`--mutex-tag` 不影响） |
-| 程序集版本 | `AssemblyVersion` / `AssemblyFileVersion` = `2.2.0.0` |
+| 程序集版本 | `AssemblyVersion` / `AssemblyFileVersion` = `2.2.1.0` |
 | 产品/标题文案 | `IP监控2.1 (NetWatcher)` / `IP监控2.1 · 网络连接监控 (NetWatcher)` / `设置 · IP监控2.1` |
 | 仓库位置 | Gitee 根目录下的 `2.1/` 子文件夹（与 2.0 并列；根目录 2.0 文件一律不改） |
 
@@ -234,6 +234,21 @@ Main(args)
 - **刷新**：切换标签页立即刷新；停留本页时每 ≥15 秒刷新（与历史概览一致）。
 - **空态**："该日期暂无可绘制的分钟采样数据 / 程序需在该日运行满 1 分钟并已落盘"；顶部汇总显示"（无数据…）"。
 
+## 5.6 进程视图刷新状态保持（2.2.1，已实现）
+
+- **背景**：进程视图每 ≥5 秒自动刷新（`RebindProc`）会整体重建 `TreeView`；旧实现用 `FullPath`（含动态字节数文本）
+  匹配展开节点，重建后文本变化 → 匹配失败，展开状态/选中行丢失；旧逻辑 `!procTreeBuilt || expanded.Count == 0`
+  把"用户主动全部折叠"误判为首次构建而 `ExpandAll()`。
+- **稳定 key**：`ProcNodeKey(name)` = `N|进程名`；`ProcPidKey(name,pid)` = `N|进程名|P|pid`；
+  `ProcIpKey(name,pid,ip)` = `N|进程名|P|pid|I|ip`。**只含稳定业务字段，不掺字节数等动态文本**；节点 `Name` 写入对应 key。
+- **刷新流程**：刷新前用 `CollectExpanded` 记录展开节点的 key，并记录 `SelectedNode.Name` 与 `TopNode.Name`；
+  重建后 `CollapseAll()` → `ApplyTreeExpansionCore()` 只展开用户展开过的 key → `RestoreTreeSelection(selectedKey, topKey)`。
+- **默认折叠**：首次构建、新出现的进程/PID/IP 节点一律默认折叠；不再自动 `ExpandAll()`。
+- **选中/滚动**：`RestoreTreeSelection` 只恢复"当前可见"的选中/置顶节点（`IsTreeNodeVisible` 检查父链展开状态）；
+  选中节点若因折叠不可见，则不强行展开父节点。
+- **兜底与切页**：隐藏页时 `Expand/SelectedNode` 可能不生效，由 `treeProcs.HandleCreated` / `VisibleChanged`
+  触发 `ApplyTreeExpansion()` 兜底；切换标签页再切回仍保持展开/选中。
+
 ## 6. 配置（src/Config.cs）
 
 字段（JSON 键名保持，兼容旧 config.json）：
@@ -256,7 +271,7 @@ P1 已实现：
 3. **五个标签页必须可见可点**：`实时连接`、`进程视图`、`按日统计`、`趋势`（2.2.0）、`历史概览`。
 4. 实时连接：顶部 4 个统计（↓速度 / ↑速度 / 今日↓ / 今日↑）+ 上表（IP 汇总）+ 下表（连接明细）。
 5. **列头可排序**（点列头切换升降序，刷新后保持）；行可复制（Ctrl+C 或右键菜单）。
-6. 新 IP 用颜色/`NEW` 标记；进程视图树形「进程 → PID → IP」，双击 IP 行可筛选。
+6. 新 IP 用颜色/`NEW` 标记；进程视图树形「进程 → PID → IP」，双击 IP 行可筛选；**2.2.1 起刷新保持展开/选中、默认全部折叠**（见 §5.6）。
 7. 底部：设置 / 导出CSV / 打开数据目录 / 以管理员身份重启。
 8. 高 DPI 友好（AutoScaleMode.Dpi），微软雅黑 9pt，最小 900×620，默认 1180×780。
 9. 托盘：显示主窗口 / 刷新 / 退出；关闭窗口最小化到托盘（真实点击 X 后进程存活、窗口隐藏）。
@@ -313,7 +328,7 @@ P1 已实现：
 |---|---|---|
 | P2 | 体验项 | 列宽记忆、CSV 导出范围等；~~历史趋势图~~ ✅ 2.2.0 已实现（趋势页） |
 | 交付-1 | 真机安装/卸载验证 | ✅ 2026-10-31 真机通过（install→数据续接→uninstall 保留数据→重装），见 `2.1-真机验收补记.md` |
-| 交付-2 | 打包与发布 | `IP监控2.1-发布包.zip`（2.2.0）；Gitee/GitHub push、tag、Release 由发布步骤完成 |
+| 交付-2 | 打包与发布 | `IP监控2.1-发布包.zip`（2.2.1）；Gitee/GitHub push、tag、Release 见 tag `v2.2.1` |
 | 限制-1 | 管理员重启/UAC | P1-7 无法自动化，仅静态检查 |
 | 限制-2 | EStats 成功路径 | 本机非管理员不可用（`rc=50/winerr=122`），P1-12 仅静态检查 |
 | 限制-3 | 刷新节流动态计时 | P1-11 仅静态阈值检查 |
@@ -331,7 +346,7 @@ P1 已实现：
 
 ## 11. 验收标准（2.2.0 已达成）
 
-- [x] `2.1\build.bat` 干净编译（0 error/0 warning），`bin\NetWatcher.exe` 可双击运行，版本资源 **2.2.0.0**
+- [x] `2.1\build.bat` 干净编译（0 error/0 warning），`bin\NetWatcher.exe` 可双击运行，版本资源 **2.2.1.0**
 - [x] **五个标签页**可见、可切换（含趋势页；GUI 冒烟：标签栏 100% 可见、文本正确、真实点击通过）
 - [x] 普通用户模式：总流量、速率、连接明细、城市、历史均正常；逐 IP 明确标注"估算"
 - [x] **P0-1 同日重启**：`sampleCount 6→12`、`firstSampleUnix` 不变、bytes 不回退
@@ -341,17 +356,18 @@ P1 已实现：
       `--selftest` 不被写锁阻塞；`--mutex-tag` 不绕过写锁
 - [x] **P1-5~P1-12**：回归 38/38 PASS（P1-7/11/12 为静态证据，已如实记录）
 - [x] **2.2.0 日期行/活动筛选/趋势页**：日期行按页生效、6 项筛选语义、趋势归一化/断点/Y 轴/悬停均已实现；最终全量回归 **164 项全 PASS（0 FAIL / 0 WARN）**（见 `_analysis\v220-验收\02-最终回归.md`、`03-手工验收.md`）
+- [x] **2.2.1 进程视图刷新状态**：稳定 key、默认全部折叠、恢复展开/选中/滚动、新节点折叠、切页保持（实现见 §5.6）；回归 **164 项全 PASS**（`_analysis\v221-验收\01-回归.md`），进程树行为真机 UI 手测 **PASS=40 / FAIL=0 / WARN=0**（`_analysis\v221-验收\02-进程树状态验证.md`）
 - [x] 数据原子写入；`verify.ps1` 数据链路检查全 PASS（逐 IP 对账误差 0、分钟桶上限、无残留 .tmp）
 - [x] `2.1\install.ps1` / `uninstall.ps1` 幂等；**只动 NetWatcher2.1**（PS 5.1 Parser 0 error；真机安装/卸载验收通过，见 `2.1-真机验收补记.md`）
 - [x] 签名：`bin\NetWatcher.exe` 用 **2.0 已有证书**签名成功，Authenticode `Valid`
 - [x] 文档齐套且版本号统一 **2.2.0**：README / CHANGELOG / START-HERE / design-2.1 / 用户手册 / 开发与维护指南 / 踩坑记录 / 2.1-交接说明
-- [x] 「IP监控2.1」在 `2.1/` 文件夹（与 2.0 并列；根目录 2.0 文件不动）——2.2.0 定版已合并 `main` 并推送 Gitee + GitHub、tag `v2.2.0`、GitHub Release（发布提交号见 tag）
+- [x] 「IP监控2.1」在 `2.1/` 文件夹（与 2.0 并列；根目录 2.0 文件不动）——2.2.1 定版已合并 `main` 并推送 Gitee + GitHub、tag `v2.2.1`、GitHub Release（发布提交号见 tag）
 
 ## 12. 与 2.0 的差异（汇总，2.2.0 沿用）
 
-| 维度 | 2.0.2 | 2.1.x / 2.2.0 |
+| 维度 | 2.0.2 | 2.1.x / 2.2.0 / 2.2.1 |
 |---|---|---|
-| 程序名 / 版本 | IP监控2.0 / 2.0.2.0 | IP监控2.1 / **2.2.0.0** |
+| 程序名 / 版本 | IP监控2.0 / 2.0.2.0 | IP监控2.1 / **2.2.1.0** |
 | 安装目录 / 自启值 / 快捷方式 | `Programs\NetWatcher` / `NetWatcher` / `IP监控.lnk` | `Programs\NetWatcher2.1` / `NetWatcher2.1` / `IP监控2.1.lnk` |
 | 数据目录 | `%APPDATA%\NetWatcher` | 不变（2.0/2.1 共用，禁止同时运行） |
 | 单实例 | `NetWatcher_SingleInstance_Mutex` | `NetWatcher2.1_SingleInstance_Mutex`（+ `_Activate`） |
@@ -368,6 +384,7 @@ P1 已实现：
 | 非实时页刷新 | 每次采样整表重建 | 5s/15s 节流 |
 | EStats 错误 | 仅状态栏文案 | 首次失败写 `monitor.log`，恢复后清除 |
 | 安装/卸载脚本 | 2.0 命名空间 | 2.1 命名空间，只动自己；2.0 的一切不碰 |
+| 进程视图刷新 | 整体重建、无状态保持 | **2.2.1**：默认全部折叠，刷新后保持展开/选中/滚动，新节点折叠，切页保持 |
 | 标签页 | 4 个 | **5 个**（2.2.0 新增「趋势」） |
 | 日期行 | 未按页生效、无选中态 | **按页生效**（实时页换活动筛选；今天恒可选/无数据置灰/禁未来/空态；跨日自动刷新） |
 | 活动筛选 | 无 | **6 项**（全部 / 今天新出现 / 仅活跃 / 当前速度 Top20 / 仅公网 / 长连接>60s） |
