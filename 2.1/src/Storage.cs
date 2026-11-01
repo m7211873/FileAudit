@@ -731,9 +731,29 @@ namespace NetWatcher
             }
         }
 
-        // 历史概览用：只读明文头，不 AES 解密（按日最多 24 个文件，几十微秒级）。
+        // 历史概览用：免解密快速出每日汇总。
+        // 2.3.0 收口：单文件日（legacy 单文件 / 单会话单小时）明文头里的 ipCount/procCount 就是该日精确值，
+        // 只读前 76B 最快；一天有多个小时文件时，各文件头和里的 ip/proc 计数会按小时重复累加（未去重），
+        // 因此改为解密合并出精确值（24 文件合并 ~20ms 量级，历史首载可接受）。
         public static DayData LoadDaySummary(string date)
         {
+            lock (Lock)
+            {
+                try
+                {
+                    List<string> files = ListHourFiles(date);
+                    if (files.Count > 1)
+                    {
+                        // LoadDay 内部同样 lock(Lock)（C# lock 可重入，同一线程不会死锁），返回去重后的精确汇总。
+                        DayData full = LoadDay(date);
+                        if (full != null) return full.SummaryOnly();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log("LoadDaySummary(" + date + ") 多文件合并失败: " + ex.Message);
+                }
+            }
             DayData s = new DayData { date = date };
             lock (Lock)
             {

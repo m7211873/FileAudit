@@ -606,7 +606,7 @@ namespace NetWatcher
                 List<string> histDates = Store.ListDates();
                 for (int i = 0; i < histDates.Count; i++) Store.LoadDaySummary(histDates[i]);
                 swHist.Stop();
-                L("  历史概览 30 天首载: " + swHist.ElapsedMilliseconds + " ms（" + histDates.Count + " 天，仅读明文头免解密）");
+                L("  历史概览 30 天首载: " + swHist.ElapsedMilliseconds + " ms（" + histDates.Count + " 天；单文件日只读明文头、多文件日解密合并去重）");
                 L("  selftest 迁移策略: 不触碰真实 data\\（legacy 迁移只在 GUI/daemon 拿到数据写锁后由 Monitor 构造调用）");
             }
             catch (Exception stEx) { L("  存储自检异常: " + stEx.Message); }
