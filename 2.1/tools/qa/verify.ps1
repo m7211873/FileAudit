@@ -154,6 +154,8 @@ public static class QaWin
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    public static IntPtr ForegroundWindow() { return GetForegroundWindow(); }
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
     [DllImport("user32.dll", EntryPoint = "SendMessageW")] public static extern IntPtr SendMessageTCItem(IntPtr h, int msg, IntPtr w, ref TCITEMW item);
     [DllImport("user32.dll", EntryPoint = "SendMessageW")] public static extern IntPtr SendMessageRect(IntPtr h, int msg, IntPtr w, ref RECT rect);
@@ -440,6 +442,34 @@ function Wait-ProcessExit {
     return $false
 }
 
+# 2.2.0：趋势页是自绘 Panel（趋势曲线），截图里在指定矩形内统计「曲线像素」。
+# 蓝色 = DrawTrend 的下载线 Color.FromArgb(46,110,200)；橙色 = 上传线 Color.FromArgb(220,120,32)。
+# 给抗锯齿留 ±45 容差；按 2px 抽样以控制耗时。仅在脚本自己截的本机窗口图上运行（不读用户数据）。
+function Test-ImageRegionCurve {
+    param([string]$Path, [int]$X, [int]$Y, [int]$W, [int]$H)
+    $bmp = New-Object System.Drawing.Bitmap($Path)
+    try {
+        $x0 = [Math]::Max(0, $X); $y0 = [Math]::Max(0, $Y)
+        $x1 = [Math]::Min($bmp.Width - 1, $X + $W - 1); $y1 = [Math]::Min($bmp.Height - 1, $Y + $H - 1)
+        if ($x1 -le $x0 -or $y1 -le $y0) { return [pscustomobject]@{ Ok = $false; Blue = 0; Orange = 0; NonWhiteFraction = 0; Samples = 0; Rect = 'invalid' } }
+        $blue = 0; $orange = 0; $nonWhite = 0; $total = 0
+        for ($y = $y0; $y -le $y1; $y += 2) {
+            for ($x = $x0; $x -le $x1; $x += 2) {
+                $c = $bmp.GetPixel($x, $y)
+                $total++
+                if ($c.R -lt 245 -or $c.G -lt 245 -or $c.B -lt 245) { $nonWhite++ }
+                if ([Math]::Abs($c.R - 46) -le 45 -and [Math]::Abs($c.G - 110) -le 45 -and [Math]::Abs($c.B - 200) -le 45) { $blue++ }
+                if ([Math]::Abs($c.R - 220) -le 45 -and [Math]::Abs($c.G - 120) -le 45 -and [Math]::Abs($c.B - 32) -le 45) { $orange++ }
+            }
+        }
+        return [pscustomobject]@{
+            Ok = $true; Blue = $blue; Orange = $orange
+            NonWhiteFraction = [Math]::Round($nonWhite / [Math]::Max(1, $total), 5); Samples = $total
+            Rect = ("{0},{1} {2}x{3}" -f $x0, $y0, ($x1 - $x0 + 1), ($y1 - $y0 + 1))
+        }
+    } finally { $bmp.Dispose() }
+}
+
 # ------------------------------------------------------------------ 0. 预检
 Write-Host ''
 Write-Host "NetWatcher 2.1 QA verify  ($RunTag)" -ForegroundColor White
@@ -590,10 +620,14 @@ try {
             }
         } else { Fail 'SELFTEST_ESTATS_CONCLUSION' '缺少 "EStats 结论:" 行（design §6 硬要求）' }
 
-        # EStats 诊断矩阵：rc/winerr 行数
+        # EStats 诊断矩阵：design §6 要求给出 rw(1/4) × rod(48/16/1024) 的 rc/winerr 诊断组合。
+        # 注意：自检按「失败连接」分行输出，每行含 6 个 rw×rod 组合；行数 = 自检时的远端连接数（会随环境变化），
+        # 用行数 >=5 判定会把「连接少」误报成 WARN（2.2.0 收口：改为校验组合数，判据更贴 design §6，不削弱）。
         $estatsDiag = @([regex]::Matches($selfText, '(?im)^.*(rc\s*=\s*\d+|winerr\s*=\s*-?\d+|set\s*=\s*\d+).*$') | ForEach-Object { $_.Value.Trim() })
-        if ($estatsDiag.Count -ge 5) { Pass 'SELFTEST_ESTATS_DIAG' ("{0} 行 rc/winerr 诊断" -f $estatsDiag.Count) }
-        elseif ($estatsDiag.Count -ge 1) { Warn 'SELFTEST_ESTATS_DIAG' ("只有 {0} 行 rc/winerr 诊断（design §6 期望 rw×rod 矩阵）" -f $estatsDiag.Count) }
+        $estatsCombos = @([regex]::Matches($selfText, 'rw\s*=\s*\d+\s*\([^)]*\)\s*rod\s*=\s*\d+')).Count
+        if ($estatsCombos -ge 6) { Pass 'SELFTEST_ESTATS_DIAG' ("{0} 个 rw×rod 诊断组合（design §6 矩阵 rw 1/4 × rod 48/16/1024；来源于 {1} 个失败连接的诊断行）" -f $estatsCombos, $estatsDiag.Count) }
+        elseif ($estatsCombos -ge 1) { Warn 'SELFTEST_ESTATS_DIAG' ("只有 {0} 个 rw×rod 诊断组合（design §6 期望完整 6 组矩阵）" -f $estatsCombos) }
+        elseif ($estatsDiag.Count -ge 1) { Warn 'SELFTEST_ESTATS_DIAG' ("有 {0} 行 rc/winerr 诊断但未解析出 rw×rod 组合" -f $estatsDiag.Count) }
         else { Fail 'SELFTEST_ESTATS_DIAG' '缺少 EStats rc/winerr 诊断行（design §6）' }
         foreach ($l in ($estatsDiag | Select-Object -First 6)) { Add-Info 'ESTATS_DIAG' $l }
 
@@ -640,6 +674,19 @@ try {
 
         if ([regex]::IsMatch($selfText, '自检结束')) { Pass 'SELFTEST_TAIL' '含 "自检结束"' }
         else { Warn 'SELFTEST_TAIL' '缺少 "自检结束"（可能中途异常）' }
+
+        # 2.2.0 收口：selftest 新增「趋势绘制 1440 点 × N 次：平均 X ms/次」性能行
+        #（只画到内存位图，不写数据目录、不弹窗；design 要求 1440 点绘制 <100ms 量级）
+        $perfMatch = [regex]::Match($selfText, '趋势绘制\s*1440\s*点\s*[×xX]\s*(\d+)\s*次[：:]\s*平均\s*([0-9.]+)\s*ms')
+        if (-not $perfMatch.Success) {
+            Fail 'SELFTEST_TREND_PERF' '缺少「趋势绘制 1440 点 × N 次：平均 X ms/次」性能自检行（2.2.0 收口新增）'
+        } else {
+            $perfRuns = [int]$perfMatch.Groups[1].Value
+            $perfMs = [double]$perfMatch.Groups[2].Value
+            if ($perfRuns -lt 1) { Fail 'SELFTEST_TREND_PERF' ("自测次数异常: {0}" -f $perfRuns) }
+            elseif ($perfMs -gt 100.0) { Fail 'SELFTEST_TREND_PERF' ("1440 点绘制平均 {0:0.0} ms/次 > 100ms（性能回归）" -f $perfMs) }
+            else { Pass 'SELFTEST_TREND_PERF' ("趋势绘制 1440 点 × {0} 次：平均 {1:0.0} ms/次（阈值 <100ms）" -f $perfRuns, $perfMs) }
+        }
     } else {
         Fail 'SELFTEST_LOG' "未生成 $selfLogPath"
         $crash = Join-Path $env:TEMP 'NetWatcher-crash.log'
@@ -818,8 +865,60 @@ try {
     Write-Section '5. GUI 冒烟（标签页 / 列头 / 截图）'
     $mainHwnd = [IntPtr]::Zero
     $guiPid = 0
+    $seedPath = ''
+    $seedHashBefore = ''
+    $seedMtimeBefore = [DateTime]::MinValue
+    $script:SeedRowCount = 0
     if ($SkipGui) { Add-Info 'GUI' '已跳过 (-SkipGui：Lead 独占 GUI 验收，本脚本只做无界面链路)' }
     if (-not $SkipGui -and (Test-Path $RunExe)) {
+        try {
+            # 2.2.0：趋势页断言需要「可绘制的分钟桶数据」。在脚本自己的 %TEMP%\<tag>\gui\data 下
+            # 预置一条当日数据（绝不写 %APPDATA%\NetWatcher），由 GUI 启动时加载；
+            # GUI_DATADIR 断言同时要求「该预置文件被 GUI 启动后重写」，不因预置而放水。
+            # 2.2.0 收口后趋势页对「相邻分钟桶间隔 >5 分钟」断开不连线，所以种子必须密集（5 分钟一桶），
+            # 才能验证真实折线路径（含分段/排序/去重逻辑），而不是只画孤立点。
+            $seedDate = Get-Date -Format 'yyyy-MM-dd'
+            $seedPath = Join-Path $GuiDataSubDir ($seedDate + '.json')
+            $seedMidnightUtc = [TimeZoneInfo]::ConvertTimeToUtc([DateTime]::SpecifyKind((Get-Date).Date, [DateTimeKind]::Unspecified))
+            $seedEpochUtc = [DateTime]::new(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+            $seedMidnightUnix = [long]($seedMidnightUtc - $seedEpochUtc).TotalSeconds
+            $seedNowMin = [int][Math]::Floor(((Get-Date).TimeOfDay).TotalMinutes)
+            $seedEndMin = [Math]::Max(2, $seedNowMin - 1)
+            $seedInterval = 5
+            $seedWant = 24
+            $seedFirstMin = [Math]::Max(1, $seedEndMin - ($seedWant - 1) * $seedInterval)
+            $seedRows = New-Object System.Collections.ArrayList
+            $seedIn = [long]0; $seedOut = [long]0; $seedMaxIn = [long]0; $seedMaxOut = [long]0
+            for ($k = 0; $k -lt $seedWant; $k++) {
+                $m = $seedFirstMin + $k * $seedInterval
+                if ($m -gt $seedEndMin) { break }
+                $vin = [long](300000 + (($k * 37) % 13) * 210000)
+                $vout = [long](150000 + (($k * 53) % 11) * 95000)
+                [void]$seedRows.Add(@([long]($seedMidnightUnix + $m * 60), $vin, $vout))
+                $seedIn += $vin; $seedOut += $vout
+                if ($vin -gt $seedMaxIn) { $seedMaxIn = $vin }
+                if ($vout -gt $seedMaxOut) { $seedMaxOut = $vout }
+            }
+            $script:SeedRowCount = $seedRows.Count
+            $seedObj = [ordered]@{
+                date = $seedDate
+                bytesIn = $seedIn
+                bytesOut = $seedOut
+                peakInBps = $seedMaxIn
+                peakOutBps = $seedMaxOut
+                firstSampleUnix = [long]$seedRows[0][0]
+                lastSampleUnix = [long]$seedRows[$seedRows.Count - 1][0]
+                sampleCount = ($seedRows.Count + 30)
+                bytesPrecise = $false
+                ips = @{}
+                procs = @{}
+                samples = @($seedRows)
+            }
+            [IO.File]::WriteAllText($seedPath, ($seedObj | ConvertTo-Json -Depth 6 -Compress), (New-Object System.Text.UTF8Encoding($false)))
+            $seedHashBefore = Get-Sha256 $seedPath
+            $seedMtimeBefore = (Get-Item $seedPath).LastWriteTimeUtc
+            Add-Info 'GUI_SEED' ("趋势页测试数据已预置（{0} 个分钟桶、间隔 {1} 分钟，验证折线而非孤立点；{2}）；启动后必须被 GUI 重写" -f $seedRows.Count, $seedInterval, $seedPath)
+        } catch { Fail 'GUI_SEED' ("预置趋势页测试数据失败: " + $_.Exception.Message) }
         try {
             $guiPid = Start-WmiProcess -FilePath $RunExe -Arguments @('--datadir', $GuiDataDir, '--mutex-tag', $MutexTag) -WorkingDirectory $RunDir
             $script:GuiPid = $guiPid
@@ -844,18 +943,27 @@ try {
     }
 
     if ($mainHwnd -ne [IntPtr]::Zero) {
-        # 数据目录守卫：必须在 N 秒内看到 GUI --datadir 下 data\*.json
+        # 数据目录守卫：必须在 N 秒内看到 GUI 把预置的 data\*.json 重写（证明程序真的用了 --datadir），
+        # 而不是「只要文件存在就算过」。预置文件只在本脚本 %TEMP% 的 gui datadir 内，不涉及用户真实数据。
         $waitDeadline = (Get-Date).AddSeconds($DataWaitSec)
         $guiDataFiles = @()
+        $guiDataWritten = $false
         while ((Get-Date) -lt $waitDeadline) {
-            $guiDataFiles = Get-DataFiles -Dir $GuiDataSubDir
-            if ($guiDataFiles.Count -gt 0) { break }
+            $guiDataFiles = @(Get-DataFiles -Dir $GuiDataSubDir)
+            if ($guiDataFiles.Count -gt 0) {
+                foreach ($f in $guiDataFiles) {
+                    if ($f.FullName -ne $seedPath) { $guiDataWritten = $true; break }
+                    if ($f.LastWriteTimeUtc -gt $seedMtimeBefore) { $guiDataWritten = $true; break }
+                    try { if ((Get-Sha256 $f.FullName) -ne $seedHashBefore) { $guiDataWritten = $true; break } } catch { }
+                }
+            }
+            if ($guiDataWritten) { break }
             if (-not (Get-Process -Id $guiPid -ErrorAction SilentlyContinue)) { break }
             Start-Sleep -Milliseconds 300
         }
-        if ($guiDataFiles.Count -gt 0) { Pass 'GUI_DATADIR' ("--datadir 生效，{0}s 内已产生 {1} 个数据文件" -f $DataWaitSec, $guiDataFiles.Count) }
+        if ($guiDataWritten) { Pass 'GUI_DATADIR' ("--datadir 生效：{0}s 内 GUI 已重写预置日文件（{1} 个数据文件，趋势页数据链可用）" -f $DataWaitSec, $guiDataFiles.Count) }
         else {
-            Fail 'GUI_DATADIR' ("{0}s 内 {1} 下没有 data\\*.json，怀疑程序未使用 --datadir；立即结束进程" -f $DataWaitSec, $GuiDataDir)
+            Fail 'GUI_DATADIR' ("{0}s 内 GUI 未重写 {1} 下的数据文件（预置文件仍原样或不存在），怀疑程序未使用 --datadir 或未落盘；立即结束进程" -f $DataWaitSec, $GuiDataDir)
             [void](Stop-QaProcess -ProcessId $guiPid)
             $mainHwnd = [IntPtr]::Zero
         }
@@ -935,12 +1043,23 @@ try {
                 Fail 'GUI_TABS_LAYOUT' ("只扫出 {0}/{1} 个标签的可点击起点（标签栏不可见/不可点）" -f $tabStarts.Count, $tabCount)
             }
 
+            # 2.2.0：5 标签页预期按「标签名」而不是下标索引，避免标签顺序变化时张冠李戴。
+            # DataGridView 数量按页区分；「趋势」页是自绘 Panel（不是 DataGridView），单独用 GUI_TREND_* 断言。
+            $gridExpectedByName = @{
+                '实时连接' = 2   # 各 IP 连接摘要 + 当前连接明细
+                '进程视图' = 0   # TreeView
+                '按日统计' = 1
+                '趋势'     = 0   # 自绘 Panel + 汇总标签（无 DataGridView）
+                '历史概览' = 1
+            }
+            foreach ($tn in $tabExpected) {
+                if (-not $gridExpectedByName.ContainsKey($tn)) { Fail 'GUI_TABS_EXPECT_MAP' ("预期表缺少标签页「{0}」的 DataGridView 数量配置" -f $tn) }
+            }
             $labels = @()
             $mechOk = $true
             $realOk = $true
             $tabProblems = New-Object System.Collections.ArrayList
             $gridFoundPerTab = New-Object System.Collections.ArrayList
-            $gridExpected = @(2, 0, 1, 0, 1)
             $realNotes = New-Object System.Collections.ArrayList
             for ($i = 0; $i -lt [Math]::Min($tabExpected.Count, $tabCount); $i++) {
                 if (-not $tabRanges.ContainsKey($i)) {
@@ -949,6 +1068,7 @@ try {
                     [void]$tabProblems.Add(("标签[{0}]: 无法定位标签栏可点击区间" -f $i))
                     continue
                 }
+                $tabName = $tabExpected[$i]
                 $cx = [int](($tabRanges[$i].Min + $tabRanges[$i].Max) / 2)
                 # (a) 机械切换（PostMessage；证明控件逻辑可切，但不代表用户点得到）
                 [QaWin]::ClickTabAt($tabHwnd, $cx, 12)
@@ -970,37 +1090,123 @@ try {
                     Start-Sleep -Milliseconds 250
                 }
                 $pt = [QaWin]::ClientPointToScreen($tabHwnd, $cx, 12)
-                [void][QaWin]::SetForegroundWindow($mainHwnd)
-                Start-Sleep -Milliseconds 120
-                [QaWin]::RealClick($pt.X, $pt.Y)
-                $realDeadline = (Get-Date).AddSeconds(2)
+                # 最多 3 次真实点击：本机可能同时有用户 2.0 实例或其它 NetWatcher GUI（并行验收/开发）抢前台，
+                # 抢不到前台会让真实点击落到别人窗口上。重试并记录实际前台窗口；3 次都不行才判 FAIL（判据不变）。
                 $realSel = -1
-                while ((Get-Date) -lt $realDeadline) {
-                    $realSel = [QaWin]::TabCurSel($tabHwnd)
+                $realAttempts = 0
+                $fgNote = ''
+                for ($try = 1; $try -le 3; $try++) {
+                    $realAttempts = $try
+                    [void][QaWin]::SetForegroundWindow($mainHwnd)
+                    Start-Sleep -Milliseconds 200
+                    $fg = [QaWin]::ForegroundWindow()
+                    $fgNote = ('第{0}次点击时前台 hwnd={1}（被测主窗口={2}）' -f $try, $fg, $mainHwnd)
+                    [QaWin]::RealClick($pt.X, $pt.Y)
+                    $realDeadline = (Get-Date).AddSeconds(2)
+                    while ((Get-Date) -lt $realDeadline) {
+                        $realSel = [QaWin]::TabCurSel($tabHwnd)
+                        if ($realSel -eq $i) { break }
+                        Start-Sleep -Milliseconds 120
+                    }
                     if ($realSel -eq $i) { break }
-                    Start-Sleep -Milliseconds 120
+                    Start-Sleep -Milliseconds 150
                 }
-                if ($realSel -ne $i) { $realOk = $false; [void]$realNotes.Add(("标签[{0}] {1}: 真实点击未切换(sel={2})" -f $i, $pageText, $realSel)) }
+                if ($realSel -ne $i) { $realOk = $false; [void]$realNotes.Add(("标签[{0}] {1}: 真实点击未切换(sel={2}，尝试 {3} 次；{4})" -f $i, $pageText, $realSel, $realAttempts, $fgNote)) }
                 if ($realSel -ne $i) { [QaWin]::ClickTabAt($tabHwnd, $cx, 12); Start-Sleep -Milliseconds 250 }
-                Start-Sleep -Milliseconds 200
+                Start-Sleep -Milliseconds 250
+                $tabShotPath = ''
                 if ($Screenshot) {
                     $p = Join-Path $OutDir ("gui_tab{0}_{1}_{2}.png" -f ($i + 1), $tabExpected[$i], $RunTag)
-                    try { $s = Save-WindowShot -Hwnd $mainHwnd -Path $p; if ($s) { [void]$script:Screenshots.Add($s) } } catch { }
+                    try { $s = Save-WindowShot -Hwnd $mainHwnd -Path $p; if ($s) { [void]$script:Screenshots.Add($s); $tabShotPath = $p } } catch { }
                 }
+                # 趋势页：先定位「自绘 Panel」——它不是 DataGridView，计数时剔除，后面单独做 GUI_TREND_* 断言
+                $desc = @([QaWin]::Descendants($mainHwnd))
+                $visDesc = @($desc | Where-Object { $_.Visible })
+                $tp = $null
+                if ($tabName -eq '趋势') {
+                    $childParentSet = New-Object 'System.Collections.Generic.HashSet[long]'
+                    foreach ($w0 in $desc) { [void]$childParentSet.Add([long]$w0.Parent) }
+                    $trPanels = @($visDesc | Where-Object {
+                        $_.Class -like 'WindowsForms10.Window*' -and [string]::IsNullOrEmpty($_.Text) -and
+                        $_.W -ge 600 -and $_.H -ge 150 -and -not $childParentSet.Contains([long]$_.Hwnd)
+                    })
+                    if ($trPanels.Count -ge 1) { $tp = $trPanels | Sort-Object { $_.W * $_.H } -Descending | Select-Object -First 1 }
+                }
+                # DataGridView 计数：容器候选里剔除趋势页自绘 Panel，数量必须与预期「相等」
+                $gridExp = if ($gridExpectedByName.ContainsKey($tabName)) { [int]$gridExpectedByName[$tabName] } else { 0 }
                 $grids = @([QaWin]::GridCandidates($mainHwnd))
+                if ($tp) { $grids = @($grids | Where-Object { [long]$_.Hwnd -ne [long]$tp.Hwnd }) }
                 [void]$gridFoundPerTab.Add($grids.Count)
-                if ($grids.Count -lt $gridExpected[$i]) { [void]$tabProblems.Add(("标签[{0}] {1}: 只找到 {2} 个 DataGridView 候选（期望 >= {3}）" -f $i, $pageText, $grids.Count, $gridExpected[$i])) }
+                if ($grids.Count -ne $gridExp) { [void]$tabProblems.Add(("标签[{0}] {1}: DataGridView 数量={2}，期望 {3}" -f $i, $pageText, $grids.Count, $gridExp)) }
                 foreach ($g in $grids) {
                     $frac = [QaWin]::VisibleBand([IntPtr]$g.Hwnd, 24)
                     if ($frac -lt 0.95) { [void]$tabProblems.Add(("标签[{0}] {1}: 列头被遮挡/裁剪 可见比例 {2:P0} 网格@({3},{4}) {5}x{6}" -f $i, $pageText, $frac, $g.X, $g.Y, $g.W, $g.H)) }
                 }
-                if ($tabExpected[$i] -eq '进程视图') {
+                if ($tabName -eq '进程视图') {
                     $tv = @([QaWin]::Descendants($mainHwnd) | Where-Object { $_.Visible -and $_.Class -like '*SysTreeView32*' })
                     if ($tv.Count -lt 1) { [void]$tabProblems.Add('标签[进程视图]: 未见可见 TreeView') }
                     else {
                         $tvFrac = [QaWin]::VisibleBand([IntPtr]$tv[0].Hwnd, 24)
                         if ($tvFrac -lt 0.95) { [void]$tabProblems.Add(("标签[进程视图]: TreeView 顶部被遮挡 可见比例 {0:P0}" -f $tvFrac)) }
                     }
+                }
+
+                # 2.2.0 新增断言 A：实时连接页隐藏日期行、改用「活动筛选」下拉
+                if ($tabName -eq '实时连接') {
+                    $visLive = @([QaWin]::Descendants($mainHwnd) | Where-Object { $_.Visible })
+                    $ldl = @($visLive | Where-Object { $_.Text -eq '查看日期:' })
+                    $ldb = @($visLive | Where-Object { $_.Text -eq '今天' -or $_.Text -eq '昨天' -or $_.Text -eq '前天' })
+                    if ($ldl.Count -eq 0 -and $ldb.Count -eq 0) { Pass 'GUI_LIVE_DATEROW_HIDDEN' '实时连接页日期行已隐藏（2.2.0 日期行按页生效）' }
+                    else { Fail 'GUI_LIVE_DATEROW_HIDDEN' ("实时连接页仍显示日期行: 查看日期标签={0} 快捷按钮={1}" -f $ldl.Count, $ldb.Count) }
+                    $lcbo = @($visLive | Where-Object { $_.Class -like '*COMBOBOX*' })
+                    if ($lcbo.Count -ge 1) { Pass 'GUI_LIVE_ACTIVITY_FILTER' ("实时连接页活动筛选下拉可见（{0} 个 COMBOBOX，首个 {1}x{2}）" -f $lcbo.Count, $lcbo[0].W, $lcbo[0].H) }
+                    else { Fail 'GUI_LIVE_ACTIVITY_FILTER' '实时连接页未见可见的「活动筛选」下拉框（期望至少 1 个 COMBOBOX）' }
+                }
+
+                # 2.2.0 新增断言 B：趋势页 = 汇总标签 + 自绘曲线 Panel（不是 DataGridView）
+                if ($tabName -eq '趋势') {
+                    # (1) 真实汇总标签（不是「加载中…」）
+                    $trSummary = @($visDesc | Where-Object { $_.Class -like '*STATIC*' -and $_.Text -match '^趋势' }) | Select-Object -First 1
+                    if (-not $trSummary) { Fail 'GUI_TREND_SUMMARY' '趋势页未找到可见的「趋势 · …」汇总标签' }
+                    elseif ($trSummary.Text -match '加载中') { Fail 'GUI_TREND_SUMMARY' ("趋势页汇总仍停在加载态: {0}" -f $trSummary.Text) }
+                    elseif ($trSummary.Text -match '趋势 · ' -and ($trSummary.Text -match '当日总量' -or $trSummary.Text -match '无数据')) { Pass 'GUI_TREND_SUMMARY' ("{0}" -f $trSummary.Text) }
+                    else { Fail 'GUI_TREND_SUMMARY' ("趋势汇总文本不符合预期: {0}" -f $trSummary.Text) }
+                    # (2) 预置的分钟桶必须被读到（证明趋势页真的加载并会绘制数据）
+                    $seedExpect = [int]$script:SeedRowCount
+                    if ($trSummary -and $trSummary.Text -match '分钟桶 (\d+) 条') {
+                        $trBuckets = [int]$Matches[1]
+                        if ($trBuckets -ge $seedExpect) { Pass 'GUI_TREND_SEED_LOADED' ("趋势页读到预置分钟桶: 分钟桶 {0} 条（预置 {1} 条）" -f $trBuckets, $seedExpect) }
+                        else { Fail 'GUI_TREND_SEED_LOADED' ("趋势页只读到 {0} 个分钟桶（预置 {1} 个，期望 >={1}；加载/归并逻辑可能未生效）" -f $trBuckets, $seedExpect) }
+                    } else { Fail 'GUI_TREND_SEED_LOADED' '趋势页汇总未出现「分钟桶 N 条」，无法确认预置数据被加载' }
+                    # (2b) 2.2.0 收口：相邻分钟桶间隔 <=5 分钟应连成 1 段曲线（种子按 5 分钟一桶），
+                    #      若断点判据把正常连续数据也断开，汇总会显示「曲线 N 段」（N>1）→ 判 FAIL。
+                    if ($trSummary -and $trSummary.Text -match '曲线 (\d+) 段') {
+                        $segCount = [int]$Matches[1]
+                        if ($segCount -eq 1) { Pass 'GUI_TREND_SEGMENTS' ("密集分钟桶（间隔 5 分钟）连成 1 段曲线（汇总: 曲线 {0} 段）" -f $segCount) }
+                        else { Fail 'GUI_TREND_SEGMENTS' ("密集分钟桶本应连成 1 段，实际 {0} 段（断点判据可能误断正常数据）" -f $segCount) }
+                    } else { Fail 'GUI_TREND_SEGMENTS' '趋势汇总未出现「曲线 N 段」，无法确认断点逻辑输出' }
+                    # (3) 自绘曲线 Panel（前面已定位）：断言可见性，并用像素证据证明曲线真的画出来了
+                    if (-not $tp) { Fail 'GUI_TREND_PANEL' '趋势页未找到可见的自绘曲线 Panel（可见/空文本/>=600x150/无子窗口）' }
+                    else {
+                        $tpFrac = [QaWin]::VisibleBand([IntPtr]$tp.Hwnd, [Math]::Min(24, $tp.H))
+                        if ($tpFrac -ge 0.95) { Pass 'GUI_TREND_PANEL' ("自绘曲线 Panel @({0},{1}) {2}x{3}，顶部可见比例 {4:P0}" -f $tp.X, $tp.Y, $tp.W, $tp.H, $tpFrac) }
+                        else { Fail 'GUI_TREND_PANEL' ("自绘曲线 Panel 被遮挡/裁剪，可见比例 {0:P0} @({1},{2}) {3}x{4}" -f $tpFrac, $tp.X, $tp.Y, $tp.W, $tp.H) }
+                        # (4) 像素证据：截图曲线区（裁掉顶部 50px 图例区）必须出现下载蓝线 + 上传橙线
+                        if ($Screenshot -and $tabShotPath -and (Test-Path $tabShotPath)) {
+                            $wr = [QaWin]::Rect($mainHwnd)
+                            $rx = [int]($tp.X - $wr.Left + 6); $ry = [int]($tp.Y - $wr.Top + 50)
+                            $rw = [int]($tp.W - 12); $rh = [int]($tp.H - 56)
+                            $curve = Test-ImageRegionCurve -Path $tabShotPath -X $rx -Y $ry -W $rw -H $rh
+                            if (-not $curve.Ok) { Fail 'GUI_TREND_CURVE' '趋势曲线区截图裁剪失败（区域无效）' }
+                            elseif ($curve.Blue -ge 30 -and $curve.Orange -ge 30) { Pass 'GUI_TREND_CURVE' ("曲线区像素证据: 下载蓝线 {0} px / 上传橙线 {1} px / 非白占比 {2:P2}（区域 {3}）" -f $curve.Blue, $curve.Orange, $curve.NonWhiteFraction, $curve.Rect) }
+                            else { Fail 'GUI_TREND_CURVE' ("曲线区未见完整蓝/橙曲线: 蓝 {0} px / 橙 {1} px / 非白 {2:P2}（区域 {3}）；可能只画了坐标轴/文字" -f $curve.Blue, $curve.Orange, $curve.NonWhiteFraction, $curve.Rect) }
+                        } else { Fail 'GUI_TREND_CURVE' '趋势页截图缺失，无法做曲线像素证据' }
+                    }
+                    # (5) 2.2.0 日期行在非实时页生效：趋势页应有「查看日期:」+ 今天/昨天/前天
+                    $tdl = @($visDesc | Where-Object { $_.Text -eq '查看日期:' })
+                    $tdb = @($visDesc | Where-Object { $_.Text -eq '今天' -or $_.Text -eq '昨天' -or $_.Text -eq '前天' })
+                    if ($tdl.Count -ge 1 -and $tdb.Count -ge 3) { Pass 'GUI_DATEBAR_TREND' ("趋势页日期行可见（查看日期: + 今天/昨天/前天 {0} 个按钮）" -f $tdb.Count) }
+                    else { Fail 'GUI_DATEBAR_TREND' ("趋势页日期行未按设计显示: 查看日期标签={0} 快捷按钮={1}（期望 >=1 / >=3）" -f $tdl.Count, $tdb.Count) }
                 }
             }
             $labelsJoined = ($labels -join ' / ')
@@ -1013,7 +1219,7 @@ try {
             if ($realOk) { Pass 'GUI_TAB_CLICK_REAL' '所有标签页均可被真实鼠标点击切换（用户可点）' }
             else { Fail 'GUI_TAB_CLICK_REAL' ('真实鼠标点击无法切换：' + (($realNotes | Select-Object -First 4) -join '; ')) }
 
-            if ($tabProblems.Count -eq 0) { Pass 'GUI_GRID_HEADERS' ("各页 DataGridView 列头均可见（每页网格数: {0}）" -f ($gridFoundPerTab -join ',')) }
+            if ($tabProblems.Count -eq 0) { Pass 'GUI_GRID_HEADERS' ("各页 DataGridView 列头均可见（每页 DataGridView 数（已剔除趋势页自绘 Panel）: {0}；趋势页由 GUI_TREND_* 单独断言）" -f ($gridFoundPerTab -join ',')) }
             else { Fail 'GUI_GRID_HEADERS' (($tabProblems | Select-Object -First 6) -join '; ') }
 
             if ($tabRanges.ContainsKey(0)) { [QaWin]::ClickTabAt($tabHwnd, [int](($tabRanges[0].Min + $tabRanges[0].Max) / 2), 12) }
